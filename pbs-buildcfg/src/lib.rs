@@ -48,7 +48,7 @@ macro_rules! PROXMOX_BACKUP_CACHE_DIR_M {
 #[macro_export]
 macro_rules! PROXMOX_BACKUP_FILE_RESTORE_BIN_DIR_M {
     () => {
-        "/usr/lib/x86_64-linux-gnu/proxmox-backup/file-restore"
+        "/usr/lib/aarch64-linux-gnu/proxmox-backup/file-restore"
     };
 }
 
@@ -88,7 +88,7 @@ pub const PROXMOX_BACKUP_INITRAMFS_DBG_FN: &str = concat!(
 
 /// filename of the kernel to use for booting single file restore VMs
 pub const PROXMOX_BACKUP_KERNEL_FN: &str =
-    concat!(PROXMOX_BACKUP_FILE_RESTORE_BIN_DIR_M!(), "/bzImage");
+    concat!(PROXMOX_BACKUP_FILE_RESTORE_BIN_DIR_M!(), "/Image");
 
 pub const PROXMOX_BACKUP_SUBSCRIPTION_FN: &str = configdir!("/subscription");
 
