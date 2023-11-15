@@ -270,6 +270,10 @@ pub async fn start_vm(
         &format!("/dev/fd/{}", pid_file.as_raw_fd()),
         "-name",
         PBS_VM_NAME,
+	"-cpu",
+	"host",
+	"-M",
+	"virt,gic-version=host",
     ];
 
     // Generate drive arguments for all fidx files in backup snapshot
@@ -297,16 +301,17 @@ pub async fn start_vm(
 
         // a PCI bus can only support 32 devices, so add a new one every 32
         let bus = (id / 32) + 2;
-        if id % 32 == 0 {
-            drives.push("-device".to_owned());
-            drives.push(format!("pci-bridge,id=bridge{bus},chassis_nr={bus}"));
-        }
+//        if id % 32 == 0 {
+  //          drives.push("-device".to_owned());
+    //        drives.push(format!("pci-bridge,id=bridge{bus},chassis_nr={bus}"));
+      //  }
 
         drives.push("-device".to_owned());
         // drive serial is used by VM to map .fidx files to /dev paths
         let serial = file.strip_suffix(".img.fidx").unwrap_or(&file);
+	let pcieid = id + 7;
         drives.push(format!(
-            "virtio-blk-pci,drive=drive{id},serial={serial},bus=bridge{bus}"
+            "virtio-blk-pci,drive=drive{id},serial={serial},bus=pcie.0,addr=0x{pcieid}"
         ));
         id += 1;
     }
@@ -325,13 +330,14 @@ pub async fn start_vm(
     // Try starting QEMU in a loop to retry if we fail because of a bad 'cid' value
     let mut attempts = 0;
     loop {
-        let mut qemu_cmd = std::process::Command::new("qemu-system-x86_64");
+        let mut qemu_cmd = std::process::Command::new("qemu-system-aarch64");
         qemu_cmd.args(base_args.iter());
         qemu_cmd.arg("-m");
-        qemu_cmd.arg(format!(
-            "{ram}M,slots=1,maxmem={}M",
-            MAX_MEMORY_DIMM_SIZE + ram
-        ));
+        qemu_cmd.arg("1024");
+//        qemu_cmd.arg(format!(
+  //          "{ram}M,slots=1,maxmem={}M",
+    //        MAX_MEMORY_DIMM_SIZE + ram
+      //  ));
         qemu_cmd.args(&drives);
         qemu_cmd.arg("-device");
         qemu_cmd.arg(format!(
@@ -387,7 +393,7 @@ pub async fn start_vm(
                 cid = cid.wrapping_add(1).max(10);
             } else {
                 log::error!("{out}");
-                bail!("Starting VM failed. See output above for more information.");
+                bail!("Starting VM failed. See output above for more information.{out}");
             }
         }
     }
