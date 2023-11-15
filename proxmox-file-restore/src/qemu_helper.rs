@@ -91,7 +91,6 @@ async fn create_temp_initramfs(ticket: &str, debug: bool) -> Result<(File, Strin
         make_tmp_file("/tmp/file-restore-qemu.initramfs.tmp", CreateOptions::new())?;
     nix::unistd::unlink(&tmp_path)?;
     fd_change_cloexec(tmp_file.as_raw_fd(), false)?;
-
     let initramfs = if debug {
         pbs_buildcfg::PROXMOX_BACKUP_INITRAMFS_DBG_FN
     } else {
@@ -262,14 +261,18 @@ pub async fn start_vm(
         // NOTE: ZFS requires that the ARC can at least grow to the max transaction size of 64MB
         // also: setting any of min/max to zero will rather do the opposite of what one wants here
         &format!(
-            "{} panic=1 zfs.zfs_arc_min=33554432 zfs.zfs_arc_max=67108864 memhp_default_state=online_kernel",
+            "{} zfs.zfs_arc_min=33554432 zfs.zfs_arc_max=67108864 memhp_default_state=online_kernel\",
             if debug { "debug" } else { "quiet" }
         ),
         "-daemonize",
         "-pidfile",
-        &format!("/dev/fd/{}", pid_file.as_raw_fd()),
+        &format!("/dev/fd/{}", pid_file.as_raw_fd()"),
         "-name",
         PBS_VM_NAME,
+        "-cpu",
+        "host",
+        "-M",
+        "virt,gic-version=host",
     ];
 
     // Generate drive arguments for all fidx files in backup snapshot
@@ -297,16 +300,17 @@ pub async fn start_vm(
 
         // a PCI bus can only support 32 devices, so add a new one every 32
         let bus = (id / 32) + 2;
-        if id % 32 == 0 {
-            drives.push("-device".to_owned());
-            drives.push(format!("pci-bridge,id=bridge{bus},chassis_nr={bus}"));
-        }
+     //   if id % 32 == 0 {
+     //       drives.push("-device".to_owned());
+    //        drives.push(format!("pci-bridge,id=bridge{bus},chassis_nr={bus}"));
+    //    }
 
         drives.push("-device".to_owned());
         // drive serial is used by VM to map .fidx files to /dev paths
         let serial = file.strip_suffix(".img.fidx").unwrap_or(&file);
+        let drivers_addr = id + 7;
         drives.push(format!(
-            "virtio-blk-pci,drive=drive{id},serial={serial},bus=bridge{bus}"
+            "virtio-blk-pci,drive=drive{id},serial={serial},bus=pcie.0,0x{drivers_addr}"
         ));
         id += 1;
     }
@@ -325,7 +329,7 @@ pub async fn start_vm(
     // Try starting QEMU in a loop to retry if we fail because of a bad 'cid' value
     let mut attempts = 0;
     loop {
-        let mut qemu_cmd = std::process::Command::new("qemu-system-x86_64");
+        let mut qemu_cmd = std::process::Command::new("qemu-system-aarch64");
         qemu_cmd.args(base_args.iter());
         qemu_cmd.arg("-m");
         qemu_cmd.arg(format!(
@@ -387,7 +391,7 @@ pub async fn start_vm(
                 cid = cid.wrapping_add(1).max(10);
             } else {
                 log::error!("{out}");
-                bail!("Starting VM failed. See output above for more information.");
+                bail!("Starting VM failed. See output above for more information. {out}");
             }
         }
     }
