@@ -261,12 +261,15 @@ pub async fn start_vm(
         // NOTE: ZFS requires that the ARC can at least grow to the max transaction size of 64MB
         // also: setting any of min/max to zero will rather do the opposite of what one wants here
         &format!(
-            "{} zfs.zfs_arc_min=33554432 zfs.zfs_arc_max=67108864 memhp_default_state=online_kernel\",
+            "{} painc=1 zfs.zfs_arc_min=33554432 zfs.zfs_arc_max=67108864 memhp_default_state=online_kernel",
             if debug { "debug" } else { "quiet" }
         ),
         "-daemonize",
         "-pidfile",
-        &format!("/dev/fd/{}", pid_file.as_raw_fd()"),
+        &format!(
+		"/dev/fd/{}",
+		pid_file.as_raw_fd()
+	),
         "-name",
         PBS_VM_NAME,
 	"-cpu",
@@ -310,7 +313,7 @@ pub async fn start_vm(
         let serial = file.strip_suffix(".img.fidx").unwrap_or(&file);
         let drivers_addr = id + 7;
         drives.push(format!(
-            "virtio-blk-pci,drive=drive{id},serial={serial},bus=pcie.0,0x{drivers_addr}"
+            "virtio-blk-pci,drive=drive{id},serial={serial},bus=pcie.0,addr=0x{drivers_addr}"
         ));
         id += 1;
     }
