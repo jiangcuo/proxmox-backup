@@ -3,12 +3,15 @@ use serde_json::Value;
 
 use proxmox_router::{cli::*, ApiHandler, RpcEnvironment};
 use proxmox_schema::api;
+use std::io::{IsTerminal, Write};
 
 use pbs_api_types::{
-    ZfsCompressionType, ZfsRaidLevel, BLOCKDEVICE_NAME_SCHEMA, DATASTORE_SCHEMA, DISK_LIST_SCHEMA,
-    ZFS_ASHIFT_SCHEMA,
+    ZfsCompressionType, ZfsRaidLevel, BLOCKDEVICE_DISK_AND_PARTITION_NAME_SCHEMA,
+    BLOCKDEVICE_NAME_SCHEMA, DATASTORE_SCHEMA, DISK_LIST_SCHEMA, ZFS_ASHIFT_SCHEMA,
 };
-use proxmox_backup::tools::disks::{complete_disk_name, FileSystemType, SmartAttribute};
+use proxmox_backup::tools::disks::{
+    complete_disk_name, complete_partition_name, FileSystemType, SmartAttribute,
+};
 
 use proxmox_backup::api2;
 
@@ -127,6 +130,46 @@ async fn initialize_disk(
     param["node"] = "localhost".into();
 
     let info = &api2::node::disks::API_METHOD_INITIALIZE_DISK;
+    let result = match info.handler {
+        ApiHandler::Sync(handler) => (handler)(param, info, rpcenv)?,
+        _ => unreachable!(),
+    };
+
+    crate::wait_for_local_worker(result.as_str().unwrap()).await?;
+
+    Ok(Value::Null)
+}
+
+#[api(
+   input: {
+        properties: {
+            disk: {
+                schema: BLOCKDEVICE_DISK_AND_PARTITION_NAME_SCHEMA,
+            },
+        },
+   },
+)]
+/// wipe disk
+async fn wipe_disk(mut param: Value, rpcenv: &mut dyn RpcEnvironment) -> Result<Value, Error> {
+    param["node"] = "localhost".into();
+
+    // If we're on a TTY, query the user
+    if std::io::stdin().is_terminal() {
+        println!("You are about to wipe block device {}.", param["disk"]);
+        print!("Are you sure you want to continue? (y/N): ");
+        let _ = std::io::stdout().flush();
+        use std::io::{BufRead, BufReader};
+        let mut line = String::new();
+        match BufReader::new(std::io::stdin()).read_line(&mut line) {
+            Ok(_) => match line.trim() {
+                "y" | "Y" => (), // continue
+                _ => bail!("Aborting."),
+            },
+            Err(err) => bail!("Failed to read line - {err}."),
+        }
+    }
+
+    let info = &api2::node::disks::API_METHOD_WIPE_DISK;
     let result = match info.handler {
         ApiHandler::Sync(handler) => (handler)(param, info, rpcenv)?,
         _ => unreachable!(),
@@ -350,10 +393,10 @@ pub fn filesystem_commands() -> CommandLineInterface {
             CliCommand::new(&API_METHOD_CREATE_DATASTORE_DISK)
                 .arg_param(&["name"])
                 .completion_cb("disk", complete_disk_name),
-        ).insert(
+        )
+        .insert(
             "delete",
-            CliCommand::new(&API_METHOD_DELETE_DATASTORE_DISK)
-                .arg_param(&["name"]),
+            CliCommand::new(&API_METHOD_DELETE_DATASTORE_DISK).arg_param(&["name"]),
         );
 
     cmd_def.into()
@@ -375,6 +418,12 @@ pub fn disk_commands() -> CommandLineInterface {
             CliCommand::new(&API_METHOD_INITIALIZE_DISK)
                 .arg_param(&["disk"])
                 .completion_cb("disk", complete_disk_name),
+        )
+        .insert(
+            "wipe",
+            CliCommand::new(&API_METHOD_WIPE_DISK)
+                .arg_param(&["disk"])
+                .completion_cb("disk", complete_partition_name),
         );
 
     cmd_def.into()

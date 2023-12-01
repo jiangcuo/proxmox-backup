@@ -2,6 +2,17 @@ use std::fmt::Write;
 use std::path::Path;
 use std::process::Command;
 
+fn get_top_processes() -> String {
+    let (exe, args) = ("top", vec!["-b", "-c", "-w512", "-n", "1", "-o", "TIME"]);
+    let output = Command::new(exe).args(&args).output();
+    let output = match output {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).to_string(),
+        Err(err) => err.to_string(),
+    };
+    let output = output.lines().take(30).collect::<Vec<&str>>().join("\n");
+    format!("$ `{exe} {}`\n```\n{output}\n```", args.join(" "))
+}
+
 fn files() -> Vec<(&'static str, Vec<&'static str>)> {
     vec![
         (
@@ -94,16 +105,7 @@ fn function_calls() -> Vec<FunctionMapping> {
             }
             list.join(", ")
         }),
-        ("System Load & Uptime", || {
-            let output = Command::new("top")
-                .args(vec!["-b", "-c", "-w512", "-n", "1", "-o", "TIME"])
-                .output();
-            let output = match output {
-                Ok(output) => String::from_utf8_lossy(&output.stdout).to_string(),
-                Err(err) => err.to_string(),
-            };
-            output.lines().take(30).collect::<Vec<&str>>().join("\n")
-        }),
+        ("System Load & Uptime", get_top_processes),
     ]
 }
 
@@ -130,6 +132,7 @@ fn get_directory_content(path: impl AsRef<Path>) -> String {
         }
     };
     let mut out = String::new();
+    let mut first = true;
     for entry in read_dir_iter {
         let entry = match entry {
             Ok(entry) => entry,
@@ -140,7 +143,12 @@ fn get_directory_content(path: impl AsRef<Path>) -> String {
         };
         let path = entry.path();
         if path.is_file() {
-            let _ = writeln!(out, "{}", get_file_content(path));
+            if first {
+                let _ = writeln!(out, "{}", get_file_content(path));
+                first = false;
+            } else {
+                let _ = writeln!(out, "\n{}", get_file_content(path));
+            }
         } else {
             let _ = writeln!(out, "skipping sub-directory `{}`", path.display());
         }
@@ -162,7 +170,7 @@ fn get_command_output(exe: &str, args: &Vec<&str>) -> String {
                 .trim_end()
                 .to_string();
             if !stderr.is_empty() {
-                writeln!(out, "\n```\nSTDERR:\n```\n{stderr}");
+                let _ = writeln!(out, "\n```\nSTDERR:\n```\n{stderr}");
             }
             out
         }

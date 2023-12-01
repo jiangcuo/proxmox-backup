@@ -1,5 +1,5 @@
 [workspace.package]
-version = "3.0.4"
+version = "3.1.2"
 authors = [
     "Dietmar Maurer <dietmar@proxmox.com>",
     "Dominik Csapak <d.csapak@proxmox.com>",
@@ -67,7 +67,7 @@ proxmox-lang = "1.1"
 proxmox-ldap = "0.2.1"
 proxmox-metrics = "0.3"
 proxmox-openid = "0.10.0"
-proxmox-rest-server = { version = "0.4.1", features = [ "templates" ] }
+proxmox-rest-server = { version = "0.5.1", features = [ "templates" ] }
 # some use "cli", some use "cli" and "server", pbs-config uses nothing
 proxmox-router = { version = "2.0.0", default_features = false }
 # everything but pbs-config and pbs-client use "api-macro"
@@ -76,8 +76,8 @@ proxmox-section-config = "2"
 proxmox-serde = "0.1.1"
 proxmox-shared-memory = "0.3.0"
 proxmox-sortable-macro = "0.1.2"
-proxmox-subscription = { version = "0.4", features = [ "api-types" ] }
-proxmox-sys = "0.5.0"
+proxmox-subscription = { version = "0.4.2", features = [ "api-types" ] }
+proxmox-sys = "0.5.2"
 proxmox-tfa = { version = "4.0.4", features = [ "api", "api-types" ] }
 proxmox-time = "1.1.2"
 proxmox-uuid = "1"
@@ -102,6 +102,7 @@ proxmox-rrd = { path = "proxmox-rrd" }
 
 # regular crates
 anyhow = "1.0"
+async-trait = "0.1.56"
 apt-pkg-native = "0.3.2"
 base64 = "0.13"
 bitflags = "1.2.1"
@@ -153,6 +154,7 @@ zstd = { version = "0.12", features = [ "bindgen" ] }
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 apt-pkg-native.workspace = true
 base64.workspace = true
 bitflags.workspace = true

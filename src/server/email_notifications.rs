@@ -90,11 +90,14 @@ Please visit the web interface for further details:
 
 const SYNC_OK_TEMPLATE: &str = r###"
 
-Job ID:       {{job.id}}
-Datastore:    {{job.store}}
-Remote:       {{job.remote}}
-Remote Store: {{job.remote-store}}
-
+Job ID:             {{job.id}}
+Datastore:          {{job.store}}
+{{#if job.remote~}}
+Remote:             {{job.remote}}
+Remote Store:       {{job.remote-store}}
+{{else~}}
+Local Source Store: {{job.remote-store}}
+{{/if}}
 Synchronization successful.
 
 
@@ -106,11 +109,14 @@ Please visit the web interface for further details:
 
 const SYNC_ERR_TEMPLATE: &str = r###"
 
-Job ID:       {{job.id}}
-Datastore:    {{job.store}}
-Remote:       {{job.remote}}
-Remote Store: {{job.remote-store}}
-
+Job ID:             {{job.id}}
+Datastore:          {{job.store}}
+{{#if job.remote~}}
+Remote:             {{job.remote}}
+Remote Store:       {{job.remote-store}}
+{{else~}}
+Local Source Store: {{job.remote-store}}
+{{/if}}
 Synchronization failed: {{error}}
 
 
@@ -484,15 +490,17 @@ pub fn send_sync_status(
         }
     };
 
+    let tmp_src_string;
+    let source_str = if let Some(remote) = &job.remote {
+        tmp_src_string = format!("Sync remote '{}'", remote);
+        &tmp_src_string
+    } else {
+        "Sync local"
+    };
+
     let subject = match result {
-        Ok(()) => format!(
-            "Sync remote '{}' datastore '{}' successful",
-            job.remote, job.remote_store,
-        ),
-        Err(_) => format!(
-            "Sync remote '{}' datastore '{}' failed",
-            job.remote, job.remote_store,
-        ),
+        Ok(()) => format!("{} datastore '{}' successful", source_str, job.remote_store,),
+        Err(_) => format!("{} datastore '{}' failed", source_str, job.remote_store,),
     };
 
     send_job_status_mail(email, &subject, &text)?;

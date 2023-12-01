@@ -5,12 +5,12 @@ Markdown Primer
 
   "Markdown is a text-to-HTML conversion tool for web writers. Markdown allows
   you to write using an easy-to-read, easy-to-write plain text format, then
-  convertit to structurally valid XHTML (or HTML)."
+  convert it to structurally valid XHTML (or HTML)."
 
   --  John Gruber, https://daringfireball.net/projects/markdown/
 
 
-The "Notes" panel of the Proxmox Backup Server web-interface supports
+The "Notes" panel of the `Proxmox Backup`_ Server web-interface supports
 rendering Markdown text.
 
 Proxmox Backup Server supports CommonMark with most extensions of GFM (GitHub

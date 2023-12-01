@@ -4,7 +4,7 @@ Ext.define('pve-rrd-datastore', {
 	'used',
 	'total',
 	{
-	    name: 'unpriv-total', // Can't resuse 'total' here as that creates a stack overflow
+	    name: 'unpriv-total', // Can't reuse 'total' here as that creates a stack overflow
 	    calculate: function(data) {
 		let used = data.used;
 		let avail = data.available;
@@ -218,7 +218,24 @@ Ext.define('PBS.DataStoreSummary', {
 	padding: 5,
     },
 
-    tbar: ['->', { xtype: 'proxmoxRRDTypeSelector' }],
+    tbar: [
+	{
+	    xtype: 'button',
+	    text: gettext('Show Connection Information'),
+	    handler: function() {
+		let me = this;
+		let datastore = me.up('panel').datastore;
+		Ext.create('PBS.window.DatastoreRepoInfo', {
+		    datastore,
+		    autoShow: true,
+		});
+	    },
+	},
+	'->',
+	{
+	    xtype: 'proxmoxRRDTypeSelector',
+	},
+    ],
 
     items: [
 	{

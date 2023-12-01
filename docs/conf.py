@@ -71,7 +71,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = 'Proxmox Backup'
-copyright = '2019-2022, Proxmox Server Solutions GmbH'
+copyright = '2019-2023, Proxmox Server Solutions GmbH'
 author = 'Proxmox Support Team'
 
 # The version info for the project you're documenting acts as a replacement for
@@ -199,11 +199,12 @@ html_theme_options = {
     'show_powered_by': False,
 
     'extra_nav_links': {
-        'Proxmox Homepage': 'https://proxmox.com',
+        'Proxmox Homepage': 'https://www.proxmox.com',
         'PDF': 'proxmox-backup.pdf',
         'API Viewer' : 'api-viewer/index.html',
         'Prune Simulator' : 'prune-simulator/index.html',
         'LTO Barcode Generator' : 'lto-barcode/index.html',
+        'Proxmox Backup Server Wiki' : 'https://pbs.proxmox.com'
     },
 
     'sidebar_width': '320px',

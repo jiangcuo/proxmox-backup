@@ -1,7 +1,7 @@
 Backup Client Usage
 ===================
 
-The command-line client for Proxmox Backup Server is called
+The command-line client for `Proxmox Backup`_ Server is called
 :command:`proxmox-backup-client`.
 
 .. _client_repository:
@@ -25,6 +25,9 @@ brackets (for example, `[fe80::01]`).
 
 You can pass the repository with the ``--repository`` command-line option, or
 by setting the ``PBS_REPOSITORY`` environment variable.
+
+The web interface provides copyable repository text in the datastore summary
+with the `Show Connection Information` button.
 
 Below are some examples of valid repositories and their corresponding real
 values:

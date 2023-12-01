@@ -4,8 +4,8 @@ Introduction
 What is Proxmox Backup Server?
 ------------------------------
 
-Proxmox Backup Server is an enterprise-class, client-server backup solution that
-is capable of backing up :term:`virtual machine<Virtual machine>`\ s,
+`Proxmox Backup`_ Server is an enterprise-class, client-server backup solution
+that is capable of backing up :term:`virtual machine<Virtual machine>`\ s,
 :term:`container<Container>`\ s, and physical hosts. It is specially optimized
 for the `Proxmox Virtual Environment`_ platform and allows you to back up your
 data securely, even between remote sites, providing easy management through a
@@ -178,7 +178,7 @@ Mailing Lists
 Proxmox Backup Server is fully open-source and contributions are welcome! Here
 is the primary communication channel for developers:
 
-:Mailing list for developers: `Proxmox Backup Sever Development List`_
+:Mailing list for developers: `Proxmox Backup Server Development List`_
 
 Bug Tracker
 ~~~~~~~~~~~

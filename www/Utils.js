@@ -307,7 +307,7 @@ Ext.define('PBS.Utils', {
 	return Ext.String.format(gettext("in {0}"), duration);
     },
 
-    // FIXME: depreacted by Proxmox.Utils.render_size_usage ?!
+    // FIXME: deprecated by Proxmox.Utils.render_size_usage ?!
     render_size_usage: function(val, max) {
 	if (max === 0) {
 	    return gettext('N/A');
@@ -425,6 +425,7 @@ Ext.define('PBS.Utils', {
 	    verify: ['Datastore', gettext('Verification')],
 	    verify_group: ['Group', gettext('Verification')],
 	    verify_snapshot: ['Snapshot', gettext('Verification')],
+	    wipedisk: ['Device', gettext('Wipe Disk')],
 	    zfscreate: [gettext('ZFS Storage'), gettext('Create')],
 	});
 
@@ -711,6 +712,13 @@ Ext.define('PBS.Utils', {
 	return Ext.String.htmlEncode(value);
     },
 
+    render_optional_remote: function(value, metadata, record) {
+	if (!value) {
+	    return `- (${gettext('Local')})`;
+	}
+	return Ext.String.htmlEncode(value);
+    },
+
     tuningOptions: {
 	'chunk-order': {
 	    '__default__': Proxmox.Utils.defaultText + ` (${gettext('Inode')})`,
@@ -743,5 +751,4 @@ Ext.define('PBS.Utils', {
 
 	return options.join(', ');
     },
-
 });

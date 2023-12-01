@@ -11,7 +11,7 @@ Disk Management
   :align: right
   :alt: List of disks
 
-Proxmox Backup Server comes with a set of disk utilities, which are
+`Proxmox Backup`_ Server comes with a set of disk utilities, which are
 accessed using the ``disk`` subcommand or the web interface. This subcommand
 allows you to initialize disks, create various filesystems, and get information
 about the disks.
@@ -263,7 +263,7 @@ categorized by checksum, after a backup operation has been executed.
 
 
 Once you've uploaded some backups or created namespaces, you may see the backup
-type (`ct`, `vm`, `host`) and the start of the namespace hierachy (`ns`).
+type (`ct`, `vm`, `host`) and the start of the namespace hierarchy (`ns`).
 
 .. _storage_namespaces:
 

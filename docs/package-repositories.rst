@@ -70,7 +70,7 @@ and the md5sum, with the expected output below:
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 This is the stable, recommended repository. It is available for
-all `Proxmox Backup`_ subscription users. It contains the most stable packages,
+all Proxmox Backup subscription users. It contains the most stable packages,
 and is suitable for production use. The ``pbs-enterprise`` repository is
 enabled by default:
 
@@ -140,7 +140,7 @@ You can access this repository by adding the following line to
 Proxmox Backup Client-only Repository
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-If you want to :ref:`use the the Proxmox Backup Client <client_creating_backups>`
+If you want to :ref:`use the Proxmox Backup Client <client_creating_backups>`
 on systems using a Linux distribution not based on Proxmox projects, you can
 use the client-only repository.
 

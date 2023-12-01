@@ -1,5 +1,7 @@
 use anyhow::Error;
 use hex::FromHex;
+use proxmox_sys::task_log;
+use proxmox_sys::WorkerTaskContext;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -56,6 +58,31 @@ pub fn list_prune_jobs(
     Ok(list)
 }
 
+pub fn do_create_prune_job(
+    config: PruneJobConfig,
+    worker: Option<&dyn WorkerTaskContext>,
+) -> Result<(), Error> {
+    let _lock = prune::lock_config()?;
+
+    let (mut section_config, _digest) = prune::config()?;
+
+    if section_config.sections.get(&config.id).is_some() {
+        param_bail!("id", "job '{}' already exists.", config.id);
+    }
+
+    section_config.set_data(&config.id, "prune", &config)?;
+
+    prune::save_config(&section_config)?;
+
+    crate::server::jobstate::create_state_file("prunejob", &config.id)?;
+
+    if let Some(worker) = worker {
+        task_log!(worker, "Prune job created: {}", config.id);
+    }
+
+    Ok(())
+}
+
 #[api(
     protected: true,
     input: {
@@ -81,21 +108,7 @@ pub fn create_prune_job(
 
     user_info.check_privs(&auth_id, &config.acl_path(), PRIV_DATASTORE_MODIFY, true)?;
 
-    let _lock = prune::lock_config()?;
-
-    let (mut section_config, _digest) = prune::config()?;
-
-    if section_config.sections.get(&config.id).is_some() {
-        param_bail!("id", "job '{}' already exists.", config.id);
-    }
-
-    section_config.set_data(&config.id, "prune", &config)?;
-
-    prune::save_config(&section_config)?;
-
-    crate::server::jobstate::create_state_file("prunejob", &config.id)?;
-
-    Ok(())
+    do_create_prune_job(config, None)
 }
 
 #[api(

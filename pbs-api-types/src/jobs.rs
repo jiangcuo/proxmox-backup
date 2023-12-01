@@ -17,8 +17,8 @@ const_regex! {
 
     /// Regex for verification jobs 'DATASTORE:ACTUAL_JOB_ID'
     pub VERIFICATION_JOB_WORKER_ID_REGEX = concat!(r"^(", PROXMOX_SAFE_ID_REGEX_STR!(), r"):");
-    /// Regex for sync jobs 'REMOTE:REMOTE_DATASTORE:LOCAL_DATASTORE:(?:LOCAL_NS_ANCHOR:)ACTUAL_JOB_ID'
-    pub SYNC_JOB_WORKER_ID_REGEX = concat!(r"^(", PROXMOX_SAFE_ID_REGEX_STR!(), r"):(", PROXMOX_SAFE_ID_REGEX_STR!(), r"):(", PROXMOX_SAFE_ID_REGEX_STR!(), r")(?::(", BACKUP_NS_RE!(), r"))?:");
+    /// Regex for sync jobs '(REMOTE|\-):REMOTE_DATASTORE:LOCAL_DATASTORE:(?:LOCAL_NS_ANCHOR:)ACTUAL_JOB_ID'
+    pub SYNC_JOB_WORKER_ID_REGEX = concat!(r"^(", PROXMOX_SAFE_ID_REGEX_STR!(), r"|\-):(", PROXMOX_SAFE_ID_REGEX_STR!(), r"):(", PROXMOX_SAFE_ID_REGEX_STR!(), r")(?::(", BACKUP_NS_RE!(), r"))?:");
 }
 
 pub const JOB_ID_SCHEMA: Schema = StringSchema::new("Job ID.")
@@ -151,12 +151,13 @@ pub struct DatastoreNotify {
     pub prune: Option<Notify>,
 }
 
-pub const DATASTORE_NOTIFY_STRING_SCHEMA: Schema =
-    StringSchema::new("Datastore notification setting")
-        .format(&ApiStringFormat::PropertyString(
-            &DatastoreNotify::API_SCHEMA,
-        ))
-        .schema();
+pub const DATASTORE_NOTIFY_STRING_SCHEMA: Schema = StringSchema::new(
+    "Datastore notification setting, enum can be one of 'always', 'never', or 'error'.",
+)
+.format(&ApiStringFormat::PropertyString(
+    &DatastoreNotify::API_SCHEMA,
+))
+.schema();
 
 pub const IGNORE_VERIFIED_BACKUPS_SCHEMA: Schema = BooleanSchema::new(
     "Do not verify backups that are already verified if their verification is not outdated.",
@@ -203,7 +204,7 @@ pub const VERIFICATION_OUTDATED_AFTER_SCHEMA: Schema =
         },
     }
 )]
-#[derive(Serialize, Deserialize, Updater)]
+#[derive(Serialize, Deserialize, Updater, Clone, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 /// Verification Job
 pub struct VerificationJobConfig {
@@ -252,7 +253,7 @@ impl VerificationJobConfig {
         },
     },
 )]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 /// Status of Verification Job
 pub struct VerificationJobStatus {
@@ -306,7 +307,7 @@ pub struct VerificationJobStatus {
         },
     }
 )]
-#[derive(Serialize, Deserialize, Clone, Updater)]
+#[derive(Serialize, Deserialize, Clone, Updater, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 /// Tape Backup Job Setup
 pub struct TapeBackupJobSetup {
@@ -348,7 +349,7 @@ pub struct TapeBackupJobSetup {
         },
     }
 )]
-#[derive(Serialize, Deserialize, Clone, Updater)]
+#[derive(Serialize, Deserialize, Clone, Updater, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 /// Tape Backup Job
 pub struct TapeBackupJobConfig {
@@ -372,7 +373,7 @@ pub struct TapeBackupJobConfig {
         },
     },
 )]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 /// Status of Tape Backup Job
 pub struct TapeBackupJobStatus {
@@ -471,6 +472,7 @@ pub const TRANSFER_LAST_SCHEMA: Schema =
         },
         remote: {
             schema: REMOTE_ID_SCHEMA,
+            optional: true,
         },
         "remote-store": {
             schema: DATASTORE_SCHEMA,
@@ -519,7 +521,9 @@ pub struct SyncJobConfig {
     pub ns: Option<BackupNamespace>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<Authid>,
-    pub remote: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// None implies local sync.
+    pub remote: Option<String>,
     pub remote_store: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_ns: Option<BackupNamespace>,
@@ -643,7 +647,7 @@ impl KeepOptions {
         },
     }
 )]
-#[derive(Serialize, Deserialize, Default, Updater)]
+#[derive(Serialize, Deserialize, Default, Updater, Clone, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 /// Common pruning options
 pub struct PruneJobOptions {
@@ -686,7 +690,6 @@ impl PruneJobOptions {
         },
         schedule: {
             schema: PRUNE_SCHEDULE_SCHEMA,
-            optional: true,
         },
         comment: {
             optional: true,
@@ -697,7 +700,7 @@ impl PruneJobOptions {
         },
     },
 )]
-#[derive(Deserialize, Serialize, Updater)]
+#[derive(Deserialize, Serialize, Updater, Clone, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 /// Prune configuration.
 pub struct PruneJobConfig {
@@ -741,7 +744,7 @@ fn is_false(b: &bool) -> bool {
         },
     },
 )]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 /// Status of prune job
 pub struct PruneJobStatus {

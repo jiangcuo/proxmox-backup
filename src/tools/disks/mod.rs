@@ -16,10 +16,12 @@ use ::serde::{Deserialize, Serialize};
 
 use proxmox_lang::error::io_err_other;
 use proxmox_lang::{io_bail, io_format_err};
+use proxmox_rest_server::WorkerTask;
 use proxmox_schema::api;
 use proxmox_sys::linux::procfs::{mountinfo::Device, MountInfo};
+use proxmox_sys::task_log;
 
-use pbs_api_types::BLOCKDEVICE_NAME_REGEX;
+use pbs_api_types::{BLOCKDEVICE_DISK_AND_PARTITION_NAME_REGEX, BLOCKDEVICE_NAME_REGEX};
 
 mod zfs;
 pub use zfs::*;
@@ -108,6 +110,12 @@ impl DiskManage {
     /// Get a `Disk` for a name in `/sys/block/<name>`.
     pub fn disk_by_name(self: Arc<Self>, name: &str) -> io::Result<Disk> {
         let syspath = format!("/sys/block/{}", name);
+        self.disk_by_sys_path(syspath)
+    }
+
+    /// Get a `Disk` for a name in `/sys/class/block/<name>`.
+    pub fn partition_by_name(self: Arc<Self>, name: &str) -> io::Result<Disk> {
+        let syspath = format!("/sys/class/block/{}", name);
         self.disk_by_sys_path(syspath)
     }
 
@@ -206,6 +214,12 @@ struct DiskInfo {
     serial: OnceCell<Option<OsString>>,
     // for perl: #[serde(skip_serializing)]
     partition_table_type: OnceCell<Option<OsString>>,
+    // for perl: #[serde(skip_serializing)]
+    partition_entry_scheme: OnceCell<Option<OsString>>,
+    // for perl: #[serde(skip_serializing)]
+    partition_entry_uuid: OnceCell<Option<OsString>>,
+    // for perl: #[serde(skip_serializing)]
+    partition_entry_type: OnceCell<Option<OsString>>,
     gpt: OnceCell<bool>,
     // ???
     bus: OnceCell<Option<OsString>>,
@@ -402,6 +416,50 @@ impl Disk {
                 .map(|s| s == "gpt")
                 .unwrap_or(false)
         })
+    }
+
+    /// Get the partitioning scheme of which this device is a partition.
+    pub fn partition_entry_scheme(&self) -> Option<&OsStr> {
+        self.info
+            .partition_entry_scheme
+            .get_or_init(|| {
+                self.device
+                    .property_value("ID_PART_ENTRY_SCHEME")
+                    .map(|v| v.to_owned())
+            })
+            .as_ref()
+            .map(OsString::as_os_str)
+    }
+
+    /// Check if this is a partition.
+    pub fn is_partition(&self) -> bool {
+        self.partition_entry_scheme().is_some()
+    }
+
+    /// Get the type of partition entry (ie. type UUID from the entry in the GPT partition table).
+    pub fn partition_entry_type(&self) -> Option<&OsStr> {
+        self.info
+            .partition_entry_type
+            .get_or_init(|| {
+                self.device
+                    .property_value("ID_PART_ENTRY_TYPE")
+                    .map(|v| v.to_owned())
+            })
+            .as_ref()
+            .map(OsString::as_os_str)
+    }
+
+    /// Get the partition entry UUID (ie. the UUID from the entry in the GPT partition table).
+    pub fn partition_entry_uuid(&self) -> Option<&OsStr> {
+        self.info
+            .partition_entry_uuid
+            .get_or_init(|| {
+                self.device
+                    .property_value("ID_PART_ENTRY_UUID")
+                    .map(|v| v.to_owned())
+            })
+            .as_ref()
+            .map(OsString::as_os_str)
     }
 
     /// Get the bus type used for this disk.
@@ -627,7 +685,7 @@ pub enum DiskUsageType {
 #[api()]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-/// Baisc information about a partition
+/// Basic information about a partition
 pub struct PartitionInfo {
     /// The partition name
     pub name: String,
@@ -1056,6 +1114,96 @@ pub fn inititialize_gpt_disk(disk: &Disk, uuid: Option<&str>) -> Result<(), Erro
     Ok(())
 }
 
+/// Wipes all labels and the first 200 MiB of a disk/partition (or the whole if it is smaller).
+/// If called with a partition, also sets the partition type to 0x83 'Linux filesystem'.
+pub fn wipe_blockdev(disk: &Disk, worker: Arc<WorkerTask>) -> Result<(), Error> {
+    let disk_path = match disk.device_path() {
+        Some(path) => path,
+        None => bail!("disk {:?} has no node in /dev", disk.syspath()),
+    };
+
+    let is_partition = disk.is_partition();
+
+    let mut to_wipe: Vec<PathBuf> = Vec::new();
+
+    let partitions_map = disk.partitions()?;
+    for part_disk in partitions_map.values() {
+        let part_path = match part_disk.device_path() {
+            Some(path) => path,
+            None => bail!("disk {:?} has no node in /dev", part_disk.syspath()),
+        };
+        to_wipe.push(part_path.to_path_buf());
+    }
+
+    to_wipe.push(disk_path.to_path_buf());
+
+    task_log!(worker, "Wiping block device {}", disk_path.display());
+
+    let mut wipefs_command = std::process::Command::new("wipefs");
+    wipefs_command.arg("--all").args(&to_wipe);
+
+    let wipefs_output = proxmox_sys::command::run_command(wipefs_command, None)?;
+    task_log!(worker, "wipefs output: {}", wipefs_output);
+
+    let size = disk.size().map(|size| size / 1024 / 1024)?;
+    let count = size.min(200);
+
+    let mut dd_command = std::process::Command::new("dd");
+    let mut of_path = OsString::from("of=");
+    of_path.push(disk_path);
+    let mut count_str = OsString::from("count=");
+    count_str.push(count.to_string());
+    let args = [
+        "if=/dev/zero".into(),
+        of_path,
+        "bs=1M".into(),
+        "conv=fdatasync".into(),
+        count_str.into(),
+    ];
+    dd_command.args(args);
+
+    let dd_output = proxmox_sys::command::run_command(dd_command, None)?;
+    task_log!(worker, "dd output: {}", dd_output);
+
+    if is_partition {
+        // set the partition type to 0x83 'Linux filesystem'
+        change_parttype(&disk, "8300", worker)?;
+    }
+
+    Ok(())
+}
+
+pub fn change_parttype(
+    part_disk: &Disk,
+    part_type: &str,
+    worker: Arc<WorkerTask>,
+) -> Result<(), Error> {
+    let part_path = match part_disk.device_path() {
+        Some(path) => path,
+        None => bail!("disk {:?} has no node in /dev", part_disk.syspath()),
+    };
+    if let Ok(stat) = nix::sys::stat::stat(part_path) {
+        let mut sgdisk_command = std::process::Command::new("sgdisk");
+        let major = unsafe { libc::major(stat.st_rdev) };
+        let minor = unsafe { libc::minor(stat.st_rdev) };
+        let partnum_path = &format!("/sys/dev/block/{}:{}/partition", major, minor);
+        let partnum: u32 = std::fs::read_to_string(partnum_path)?.trim_end().parse()?;
+        sgdisk_command.arg(&format!("-t{}:{}", partnum, part_type));
+        let part_disk_parent = match part_disk.parent() {
+            Some(disk) => disk,
+            None => bail!("disk {:?} has no node in /dev", part_disk.syspath()),
+        };
+        let part_disk_parent_path = match part_disk_parent.device_path() {
+            Some(path) => path,
+            None => bail!("disk {:?} has no node in /dev", part_disk.syspath()),
+        };
+        sgdisk_command.arg(part_disk_parent_path);
+        let sgdisk_output = proxmox_sys::command::run_command(sgdisk_command, None)?;
+        task_log!(worker, "sgdisk output: {}", sgdisk_output);
+    }
+    Ok(())
+}
+
 /// Create a single linux partition using the whole available space
 pub fn create_single_linux_partition(disk: &Disk) -> Result<Disk, Error> {
     let disk_path = match disk.device_path() {
@@ -1130,6 +1278,22 @@ pub fn complete_disk_name(_arg: &str, _param: &HashMap<String, String>) -> Vec<S
             Ok(dir) => dir,
             Err(_) => return vec![],
         };
+
+    dir.flatten()
+        .map(|item| item.file_name().to_str().unwrap().to_string())
+        .collect()
+}
+
+/// Block device partition name completion helper
+pub fn complete_partition_name(_arg: &str, _param: &HashMap<String, String>) -> Vec<String> {
+    let dir = match proxmox_sys::fs::scan_subdir(
+        libc::AT_FDCWD,
+        "/sys/class/block",
+        &BLOCKDEVICE_DISK_AND_PARTITION_NAME_REGEX,
+    ) {
+        Ok(dir) => dir,
+        Err(_) => return vec![],
+    };
 
     dir.flatten()
         .map(|item| item.file_name().to_str().unwrap().to_string())

@@ -191,34 +191,42 @@ impl Checker {
         self.output
             .log_info("Checking bootloader configuration...")?;
 
-        // PBS packages version check needs to be run before
-        if !self.upgraded {
-            self.output
-                .log_skip("not yet upgraded, no need to check the presence of systemd-boot")?;
-        }
-
-        if !Path::new("/etc/kernel/proxmox-boot-uuids").is_file() {
-            self.output
-                .log_skip("proxmox-boot-tool not used for bootloader configuration")?;
-            return Ok(());
-        }
-
         if !Path::new("/sys/firmware/efi").is_dir() {
             self.output
                 .log_skip("System booted in legacy-mode - no need for systemd-boot")?;
             return Ok(());
         }
 
-        if Path::new("/usr/share/doc/systemd-boot/changelog.Debian.gz").is_file() {
-            self.output.log_pass("systemd-boot is installed")?;
-        } else {
+        if Path::new("/etc/kernel/proxmox-boot-uuids").is_file() {
+            // PBS packages version check needs to be run before
+            if !self.upgraded {
+                self.output
+                    .log_skip("not yet upgraded, no need to check the presence of systemd-boot")?;
+                return Ok(());
+            }
+            if Path::new("/usr/share/doc/systemd-boot/changelog.Debian.gz").is_file() {
+                self.output
+                    .log_pass("bootloader packages installed correctly")?;
+                return Ok(());
+            }
             self.output.log_warn(
                 "proxmox-boot-tool is used for bootloader configuration in uefi mode \
-                 but the separate systemd-boot package, existing in Debian Bookworm \
-                 is not installed.\n\
-                 initializing new ESPs will not work unitl the package is installed.",
+                 but the separate systemd-boot package, is not installed.\n\
+                 initializing new ESPs will not work until the package is installed.",
             )?;
+            return Ok(());
+        } else if !Path::new("/usr/share/doc/grub-efi-amd64/changelog.Debian.gz").is_file() {
+            self.output.log_warn(
+                "System booted in uefi mode but grub-efi-amd64 meta-package not installed, \
+             new grub versions will not be installed to /boot/efi!
+             Install grub-efi-amd64.",
+            )?;
+            return Ok(());
+        } else {
+            self.output
+                .log_pass("bootloader packages installed correctly")?;
         }
+
         Ok(())
     }
 
@@ -263,12 +271,39 @@ impl Checker {
         Ok(())
     }
 
+    fn check_dkms_modules(&mut self) -> Result<(), Error> {
+        let kver = std::process::Command::new("uname")
+            .arg("-r")
+            .output()
+            .map_err(|err| format_err!("failed to retrieve running kernel version - {err}"))?;
+
+        let output = std::process::Command::new("dkms")
+            .arg("status")
+            .arg("-k")
+            .arg(std::str::from_utf8(&kver.stdout)?)
+            .output();
+        match output {
+            Err(_err) => self.output.log_skip("could not get dkms status")?,
+            Ok(ret) => {
+                let num_dkms_modules = std::str::from_utf8(&ret.stdout)?.lines().count();
+                if num_dkms_modules == 0 {
+                    self.output.log_pass("no dkms modules found")?;
+                } else {
+                    self.output
+                        .log_warn("dkms modules found, this might cause issues during upgrade.")?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn check_misc(&mut self) -> Result<(), Error> {
         self.output.print_header("MISCELLANEOUS CHECKS")?;
         self.check_pbs_services()?;
         self.check_time_sync()?;
         self.check_apt_repos()?;
         self.check_bootloader()?;
+        self.check_dkms_modules()?;
         Ok(())
     }
 

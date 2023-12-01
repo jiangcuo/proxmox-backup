@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::iter::FromIterator;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -294,7 +294,7 @@ async fn create_backup_reader(
     };
     let client = connect(&params.repo)?;
     let backup_reader = BackupReader::start(
-        client,
+        &client,
         params.crypt_config.clone(),
         params.repo.store(),
         &params.namespace,
@@ -352,7 +352,7 @@ fn visit_directory<'f, 'c>(
 
             let first_chunk = index
                 .chunk_from_offset(range.start)
-                .context("Invalid offest")?
+                .context("Invalid offset")?
                 .0;
             let last_chunk = index
                 .chunk_from_offset(range.end)
@@ -447,7 +447,7 @@ async fn compare_file(
                 } else {
                     let content_identical = compare_file_contents(file_a, file_b).await?;
                     if content_identical && !changed.any_without_mtime() {
-                        // If the content is identical and nothing, exluding mtime,
+                        // If the content is identical and nothing, excluding mtime,
                         // has changed, we don't consider the entry as modified.
                         changed.mtime = false;
                     }
@@ -601,7 +601,7 @@ impl FileEntryPrinter {
         let color_choice = match output_params.color {
             ColorMode::Always => ColorChoice::Always,
             ColorMode::Auto => {
-                if unsafe { libc::isatty(1) == 1 } {
+                if std::io::stdout().is_terminal() {
                     // Show colors unless `TERM=dumb` or `NO_COLOR` is set.
                     ColorChoice::Auto
                 } else {
@@ -792,7 +792,7 @@ impl FileEntryPrinter {
         Ok(())
     }
 
-    /// Print a file entry, including `changed` indicators and column seperators
+    /// Print a file entry, including `changed` indicators and column separators
     pub fn print_file_entry(
         &mut self,
         entry: &FileEntry,

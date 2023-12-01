@@ -1034,7 +1034,7 @@ async fn create_backup(
     }
 
     if dry_run {
-        log::info!("dry-run: no upload happend");
+        log::info!("dry-run: no upload happened");
         return Ok(Value::Null);
     }
 
@@ -1313,7 +1313,7 @@ async fn restore(
     };
 
     let client = BackupReader::start(
-        client,
+        &client,
         crypt_config.clone(),
         repo.store(),
         &ns,
@@ -1453,7 +1453,7 @@ async fn restore(
                 },
                 options,
             )
-            .map_err(|err| format_err!("error extracting archive - {}", err))?;
+            .map_err(|err| format_err!("error extracting archive - {:#}", err))?;
         } else {
             let mut writer = std::fs::OpenOptions::new()
                 .write(true)
