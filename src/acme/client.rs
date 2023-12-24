@@ -10,11 +10,11 @@ use hyper::{Body, Request};
 use nix::sys::stat::Mode;
 use serde::{Deserialize, Serialize};
 
-use proxmox_acme_rs::account::AccountCreator;
-use proxmox_acme_rs::account::AccountData as AcmeAccountData;
-use proxmox_acme_rs::order::{Order, OrderData};
-use proxmox_acme_rs::Request as AcmeRequest;
-use proxmox_acme_rs::{Account, Authorization, Challenge, Directory, Error, ErrorResponse};
+use proxmox_acme::account::AccountCreator;
+use proxmox_acme::account::AccountData as AcmeAccountData;
+use proxmox_acme::order::{Order, OrderData};
+use proxmox_acme::Request as AcmeRequest;
+use proxmox_acme::{Account, Authorization, Challenge, Directory, Error, ErrorResponse};
 use proxmox_http::client::Client;
 use proxmox_sys::fs::{replace_file, CreateOptions};
 
@@ -116,6 +116,7 @@ impl AcmeClient {
         tos_agreed: bool,
         contact: Vec<String>,
         rsa_bits: Option<u32>,
+        eab_creds: Option<(String, String)>,
     ) -> Result<&'a Account, anyhow::Error> {
         self.tos = if tos_agreed {
             self.terms_of_service_url().await?.map(str::to_owned)
@@ -123,9 +124,13 @@ impl AcmeClient {
             None
         };
 
-        let account = Account::creator()
+        let mut account = Account::creator()
             .set_contacts(contact)
             .agree_to_tos(tos_agreed);
+
+        if let Some((eab_kid, eab_hmac_key)) = eab_creds {
+            account = account.set_eab_credentials(eab_kid, eab_hmac_key)?;
+        }
 
         let account = if let Some(bits) = rsa_bits {
             account.generate_rsa_key(bits)?
@@ -507,7 +512,7 @@ impl AcmeClient {
             .await
             .map_err(|err| Error::Custom(format!("failed to retrieve response body: {}", err)))?;
 
-        let got_nonce = if let Some(new_nonce) = parts.headers.get(proxmox_acme_rs::REPLAY_NONCE) {
+        let got_nonce = if let Some(new_nonce) = parts.headers.get(proxmox_acme::REPLAY_NONCE) {
             let new_nonce = new_nonce.to_str().map_err(|err| {
                 Error::Client(format!(
                     "received invalid replay-nonce header from ACME server: {}",
@@ -555,7 +560,7 @@ impl AcmeClient {
             ))
         })?;
 
-        if error.ty == proxmox_acme_rs::error::BAD_NONCE {
+        if error.ty == proxmox_acme::error::BAD_NONCE {
             if !got_nonce {
                 return Err(Error::InvalidApi(
                     "badNonce without a new Replay-Nonce header".to_string(),
@@ -572,7 +577,7 @@ impl AcmeClient {
         Self::execute(&mut self.http_client, request, &mut self.nonce).await
     }
 
-    async fn directory(&mut self) -> Result<&Directory, Error> {
+    pub async fn directory(&mut self) -> Result<&Directory, Error> {
         Ok(Self::get_directory(
             &mut self.http_client,
             &self.directory_url,

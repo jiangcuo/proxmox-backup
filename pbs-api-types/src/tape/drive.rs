@@ -59,7 +59,7 @@ pub struct VirtualTapeDrive {
         },
     }
 )]
-#[derive(Serialize, Deserialize, Updater)]
+#[derive(Serialize, Deserialize, Updater, Clone)]
 #[serde(rename_all = "kebab-case")]
 /// Lto SCSI tape driver
 pub struct LtoTapeDrive {
@@ -108,7 +108,7 @@ pub struct MamAttribute {
 }
 
 #[api()]
-#[derive(Serialize, Deserialize, Copy, Clone, Debug)]
+#[derive(Serialize, Deserialize, Copy, Clone, Debug, PartialOrd, PartialEq)]
 pub enum TapeDensity {
     /// Unknown (no media loaded)
     Unknown,

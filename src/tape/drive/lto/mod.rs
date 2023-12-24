@@ -55,7 +55,7 @@ pub fn open_lto_tape_drive(config: &LtoTapeDrive) -> Result<LtoTapeHandle, Error
             }
         }
 
-        handle.sg_tape.wait_until_ready()?;
+        handle.sg_tape.wait_until_ready(None)?;
 
         handle.set_default_options()?;
 
@@ -161,6 +161,11 @@ impl LtoTapeHandle {
         self.sg_tape
             .set_medium_removal(true)
             .map_err(|err| format_err!("unlock door failed - {}", err))
+    }
+
+    /// Returns if a medium is present
+    pub fn medium_present(&mut self) -> bool {
+        self.sg_tape.test_unit_ready().is_ok()
     }
 }
 

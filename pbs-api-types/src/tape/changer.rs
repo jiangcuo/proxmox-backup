@@ -51,6 +51,10 @@ Import/Export, i.e. any media in those slots are considered to be
             schema: EXPORT_SLOT_LIST_SCHEMA,
             optional: true,
         },
+        "eject-before-unload": {
+            optional: true,
+            default: false,
+        }
     },
 )]
 #[derive(Serialize, Deserialize, Updater)]
@@ -62,6 +66,9 @@ pub struct ScsiTapeChanger {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub export_slots: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// if set to true, tapes are ejected manually before unloading
+    pub eject_before_unload: Option<bool>,
 }
 
 #[api(

@@ -98,6 +98,31 @@ so it takes 33 hours to read the 12TB needed to fill up an LTO-8 tape. If you wa
 to write to your tape at full speed, please make sure that the source
 datastore is able to deliver that performance (for example, by using SSDs).
 
+LTO-9+ considerations
+~~~~~~~~~~~~~~~~~~~~
+
+Since LTO-9, it is necessary to initialize new media in your drives, this is
+called `Media Optimization`. This usually takes between 40 and 120 minutes per
+medium. It is recommended to initialize your media in this manner with the
+tools provided by your hardware vendor of your drive or changer. Some tape
+changers have a method to 'bulk' initialize your media.
+
+Because of this, formatting tapes is handled differently in Proxmox Backup
+Server to avoid re-optimizing on each format/labelling. If you want to format
+your media for use with the Proxmox Backup Server the first time or after use
+with another program, either use the functionality of your drive/changer, or
+use the 'slow' format on the cli:
+
+.. code-block:: console
+
+ # proxmox-tape format --drive your-drive --fast 0
+
+This will completely remove all pre-existing data and trigger a `Media
+Optimization` pass.
+
+If you format a partitioned LTO-9 medium with the 'fast' method (the default or
+by setting `--fast 1`), only the first partition will be formatted, so make
+sure to use the 'slow' method.
 
 Terminology
 -----------
@@ -325,6 +350,25 @@ the status output:
  ├───────────────┼──────────┼────────────┼─────────────┤
  │ slot          │       14 │            │             │
  └───────────────┴──────────┴────────────┴─────────────┘
+
+
+Advanced options
+^^^^^^^^^^^^^^^^
+
+Since not all tape changer behave the same, there is sometimes the need
+for configuring advanced options.
+
+Currently there are the following:
+
+* `eject-before-unload` : This is needed for some changers that require a tape
+  to be ejected before unloading from the drive.
+
+You can set these options with `proxmox-tape` like this:
+
+.. code-block:: console
+
+ # proxmox-tape changer update sl3 --eject-before-unload true
+
 
 .. _tape_drive_config:
 
@@ -664,16 +708,16 @@ dust protection than inside a drive:
 
 .. Note:: For failed jobs, the tape remains in the drive.
 
-For tape libraries, the ``export-media`` option moves all tapes from
+For tape libraries, the ``export-media-set`` option moves all tapes from
 the media set to an export slot, making sure that the following backup
 cannot use the tapes. An operator can pick up those tapes and move them
 to a vault.
 
 .. code-block:: console
 
- # proxmox-tape backup-job update job2 --export-media
+ # proxmox-tape backup-job update job2 --export-media-set
 
-.. Note:: The ``export-media`` option can be used to force the start
+.. Note:: The ``export-media-set`` option can be used to force the start
    of a new media set, because tapes from the current set are no
    longer online.
 
