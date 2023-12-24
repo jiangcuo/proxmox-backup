@@ -131,7 +131,7 @@ openssl = "0.10.40"
 percent-encoding = "2.1"
 pin-project-lite = "0.2"
 regex = "1.5.5"
-rustyline = "9"
+rustyline = "13"
 serde = { version = "1.0", features = ["derive"] }
 serde_cbor = "0.11.1"
 serde_json = "1.0"
@@ -245,35 +245,38 @@ proxmox-rrd.workspace = true
 # NOTE: You must run `cargo update` after changing this for it to take effect!
 [patch.crates-io]
 
-#proxmox-apt = { path = "../proxmox/proxmox-apt" }
-#proxmox-async = { path = "../proxmox/proxmox-async" }
-#proxmox-auth-api = { path = "../proxmox/proxmox-auth-api" }
-#proxmox-borrow = { path = "../proxmox/proxmox-borrow" }
-#proxmox-compression = { path = "../proxmox/proxmox-compression" }
-#proxmox-fuse = { path = "../proxmox-fuse" }
-#proxmox-http = { path = "../proxmox/proxmox-http" }
-#proxmox-human-byte = { path = "../proxmox/proxmox-human-byte" }
-#proxmox-io = { path = "../proxmox/proxmox-io" }
-#proxmox-lang = { path = "../proxmox/proxmox-lang" }
-#proxmox-ldap = { path = "../proxmox/proxmox-ldap" }
-#proxmox-metrics = { path = "../proxmox/proxmox-metrics" }
-#proxmox-openid = { path = "../proxmox/proxmox-openid" }
-#proxmox-rest-server = { path = "../proxmox/proxmox-rest-server" }
-#proxmox-router = { path = "../proxmox/proxmox-router" }
-#proxmox-schema = { path = "../proxmox/proxmox-schema" }
-#proxmox-section-config = { path = "../proxmox/proxmox-section-config" }
-#proxmox-serde = { path = "../proxmox/proxmox-serde" }
-#proxmox-shared-memory = { path = "../proxmox/proxmox-shared-memory" }
-#proxmox-sortable-macro = { path = "../proxmox/proxmox-sortable-macro" }
-#proxmox-subscription = { path = "../proxmox/proxmox-subscription" }
-#proxmox-sys = { path = "../proxmox/proxmox-sys" }
-#proxmox-tfa = { path = "../proxmox/proxmox-tfa" }
-#proxmox-time = { path = "../proxmox/proxmox-time" }
-#proxmox-uuid = { path = "../proxmox/proxmox-uuid" }
-
-#proxmox-acme = { path = "../proxmox-acme" }
-#pathpatterns = {path = "../pathpatterns" }
-#pxar = { path = "../pxar" }
+proxmox-apt = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+proxmox-async = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1"}
+proxmox-auth-api = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+proxmox-borrow = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+proxmox-compression = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+proxmox-fuse = { git = "https://git.proxmox.com/git/proxmox-fuse.git" , rev = "93099f76b6bbbc8a0bbaca9b459a1ce4dc5e0a79" }
+proxmox-http = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+proxmox-human-byte = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1"}
+proxmox-io = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1"}
+proxmox-lang = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+proxmox-ldap = { git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1"}
+proxmox-metrics = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1"}
+proxmox-openid = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1"}
+proxmox-rest-server = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1"}
+#proxmox-router = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+proxmox-router = {  path = "/build/proxmox/proxmox-router" }
+proxmox-schema = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+proxmox-section-config = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+proxmox-serde = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1"}
+proxmox-shared-memory = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+proxmox-sortable-macro = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+proxmox-subscription = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+proxmox-sys = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1"}
+proxmox-tfa = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1"}
+proxmox-time = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+proxmox-uuid = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+proxmox-acme = {  git = "https://github.com/jiangcuo/proxmox.git" , rev = "70e6472f8a8e8f34e8ec3b57b144fab02bacc3c1" }
+pathpatterns = { git= "https://git.proxmox.com/git/pathpatterns.git" ,rev = "281894a5b66099e919d167cd5f0644fff6aca234"}
+pxar = { git = "https://git.proxmox.com/git/pxar.git" ,rev = "fab647085426dc39c25c137575a3b8fc575c4b78" }
+perlmod  = { git = "https://git.proxmox.com/git/perlmod" , rev = "677cb0844646d7bfabcebeaaa35e84440d858195" }
+nix = { git = "https://github.com/jiangcuo/nix.git", rev = "fb787ef97be7df1b5ef3612ab6179a625d6b6c86" }
+rustyline = { git = "https://github.com/jiangcuo/rustyline.git" }
 
 [features]
 default = []
