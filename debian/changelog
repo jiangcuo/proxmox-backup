@@ -1,3 +1,9 @@
+rust-proxmox-backup (3.1.2-2) bookworm; urgency=medium
+
+  * Add loongarch64 support
+
+ -- Jiangcuo <jiangcuo@bingsin.com>  Sun, 24 Dec 2023 08:24:26 +0000
+
 rust-proxmox-backup (3.1.2-1) bookworm; urgency=medium
 
   * sync: fix recent regression with recursive remote sync

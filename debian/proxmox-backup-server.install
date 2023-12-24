@@ -7,11 +7,11 @@ etc/proxmox-backup.service /lib/systemd/system/
 usr/bin/pmt
 usr/bin/pmtx
 usr/bin/proxmox-tape
-usr/lib/aarch64-linux-gnu/proxmox-backup/proxmox-backup-api
-usr/lib/aarch64-linux-gnu/proxmox-backup/proxmox-backup-banner
-usr/lib/aarch64-linux-gnu/proxmox-backup/proxmox-backup-proxy
-usr/lib/aarch64-linux-gnu/proxmox-backup/proxmox-daily-update
-usr/lib/aarch64-linux-gnu/proxmox-backup/sg-tape-cmd
+usr/lib/loongarch64-linux-gnu/proxmox-backup/proxmox-backup-api
+usr/lib/loongarch64-linux-gnu/proxmox-backup/proxmox-backup-banner
+usr/lib/loongarch64-linux-gnu/proxmox-backup/proxmox-backup-proxy
+usr/lib/loongarch64-linux-gnu/proxmox-backup/proxmox-daily-update
+usr/lib/loongarch64-linux-gnu/proxmox-backup/sg-tape-cmd
 usr/sbin/pbs2to3
 usr/sbin/proxmox-backup-debug
 usr/sbin/proxmox-backup-manager

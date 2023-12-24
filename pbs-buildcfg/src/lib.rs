@@ -48,7 +48,7 @@ macro_rules! PROXMOX_BACKUP_CACHE_DIR_M {
 #[macro_export]
 macro_rules! PROXMOX_BACKUP_FILE_RESTORE_BIN_DIR_M {
     () => {
-        "/usr/lib/aarch64-linux-gnu/proxmox-backup/file-restore"
+        "/usr/lib/loongarch64-linux-gnu/proxmox-backup/file-restore"
     };
 }
 

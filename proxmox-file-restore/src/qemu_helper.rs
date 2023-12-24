@@ -273,9 +273,9 @@ pub async fn start_vm(
         "-name",
         PBS_VM_NAME,
 	"-cpu",
-	"host",
+	"la464-loongarch-cpu",
 	"-M",
-	"virt,gic-version=host",
+	"virt",
     ];
 
     // Generate drive arguments for all fidx files in backup snapshot
@@ -332,14 +332,12 @@ pub async fn start_vm(
     // Try starting QEMU in a loop to retry if we fail because of a bad 'cid' value
     let mut attempts = 0;
     loop {
-        let mut qemu_cmd = std::process::Command::new("qemu-system-aarch64");
+        let mut qemu_cmd = std::process::Command::new("qemu-system-loongarch64");
         qemu_cmd.args(base_args.iter());
-        qemu_cmd.arg("-m");
-        qemu_cmd.arg("1024");
-//        qemu_cmd.arg(format!(
-  //          "{ram}M,slots=1,maxmem={}M",
-    //        MAX_MEMORY_DIMM_SIZE + ram
-      //  ));
+        qemu_cmd.arg(format!(
+            "{ram}M,slots=1,maxmem={}M",
+            MAX_MEMORY_DIMM_SIZE + ram
+        ));
         qemu_cmd.args(&drives);
         qemu_cmd.arg("-device");
         qemu_cmd.arg(format!(
