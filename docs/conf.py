@@ -114,6 +114,8 @@ man_pages = [
     ('config/tape/man5', 'tape.cfg', 'Tape Drive and Changer Configuration', [author], 5),
     ('config/user/man5', 'user.cfg', 'User Configuration', [author], 5),
     ('config/verification/man5', 'verification.cfg', 'Verification Job Configuration', [author], 5),
+    ('config/notifications/man5', 'notifications.cfg', 'Notification target/matcher configuration', [author], 5),
+    ('config/notifications-priv/man5', 'notifications-priv.cfg', 'Notification target secrets', [author], 5),
 ]
 
 
@@ -264,6 +266,9 @@ html_static_path = ['_static']
 
 html_js_files = [
     'custom.js',
+]
+html_css_files = [
+    'custom.css',
 ]
 
 # Add any extra paths that contain custom files (such as robots.txt or

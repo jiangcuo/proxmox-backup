@@ -14,6 +14,7 @@ lazy_static.workspace = true
 libc.workspace = true
 log.workspace = true
 nix.workspace = true
+openssl.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -33,4 +34,5 @@ proxmox-schema = { workspace = true, features = [ "api-macro" ] }
 proxmox-router = { workspace = true, features = ["cli", "server"] }
 
 pbs-api-types.workspace = true
+pbs-buildcfg.workspace = true
 pbs-config.workspace = true

@@ -27,8 +27,9 @@ use pbs_key_config::KeyConfig;
 
 use pbs_tape::{sg_tape::TapeAlertFlags, BlockReadError, MediaContentHeader, TapeRead, TapeWrite};
 
+use crate::tape::TapeNotificationMode;
 use crate::{
-    server::send_load_media_email,
+    server::send_load_media_notification,
     tape::{
         changer::{MediaChange, MtxMediaChanger},
         drive::virtual_tape::open_virtual_tape_drive,
@@ -105,11 +106,13 @@ pub trait TapeDriver {
         key_config: Option<&KeyConfig>,
     ) -> Result<(), Error>;
 
-    /// Read the media label
+    /// Read the media label without setting the encryption key
     ///
-    /// This tries to read both media labels (label and
-    /// media_set_label). Also returns the optional encryption key configuration.
-    fn read_label(&mut self) -> Result<(Option<MediaId>, Option<KeyConfig>), Error> {
+    /// This is used internally by 'read_label' and when restoring the encryption
+    /// key from the drive. Should not be used or overwritten otherwise!
+    fn read_label_without_loading_key(
+        &mut self,
+    ) -> Result<(Option<MediaId>, Option<KeyConfig>), Error> {
         self.rewind()?;
 
         let label = {
@@ -187,6 +190,22 @@ pub trait TapeDriver {
         Ok((Some(media_id), key_config))
     }
 
+    /// Read the media label
+    ///
+    /// This tries to read both media labels (label and
+    /// media_set_label). Also returns the optional encryption key configuration.
+    ///
+    /// Automatically sets the encryption key on the drive
+    fn read_label(&mut self) -> Result<(Option<MediaId>, Option<KeyConfig>), Error> {
+        let (media_id, key_config) = self.read_label_without_loading_key()?;
+
+        let encrypt_fingerprint = media_id.as_ref().and_then(|id| id.get_encryption_fp());
+
+        self.set_encryption(encrypt_fingerprint)?;
+
+        Ok((media_id, key_config))
+    }
+
     /// Eject media
     fn eject_media(&mut self) -> Result<(), Error>;
 
@@ -203,6 +222,9 @@ pub trait TapeDriver {
     /// We use the media_set_uuid to XOR the secret key with the
     /// uuid (first 16 bytes), so that each media set uses an unique
     /// key for encryption.
+    ///
+    /// Should be called as part of write_media_set_label or read_label,
+    /// so this should not be called manually.
     fn set_encryption(
         &mut self,
         key_fingerprint: Option<(Fingerprint, Uuid)>,
@@ -212,6 +234,22 @@ pub trait TapeDriver {
         }
         Ok(())
     }
+
+    /// Asserts that the encryption mode is set to the given value
+    fn assert_encryption_mode(&mut self, encryption_wanted: bool) -> Result<(), Error> {
+        if encryption_wanted {
+            bail!("drive does not support encryption");
+        }
+        Ok(())
+    }
+
+    /// Returns volume statistics from a loaded tape
+    fn get_volume_statistics(&mut self) -> Result<pbs_api_types::Lp17VolumeStatistics, Error>;
+
+    /// Writes additional attributes on the drive, like the vendor/application/etc. (e.g. on MAM)
+    ///
+    /// Since it's not fatal when it does not work, it only logs warnings in that case
+    fn write_additional_attributes(&mut self, label: Option<String>, pool: Option<String>);
 }
 
 /// A boxed implementor of [`MediaChange`].
@@ -280,7 +318,7 @@ pub fn open_drive(config: &SectionConfigData, drive: &str) -> Result<Box<dyn Tap
             }
             "lto" => {
                 let tape = LtoTapeDrive::deserialize(config)?;
-                let handle = open_lto_tape_drive(&tape)?;
+                let handle = LtoTapeHandle::open_lto_drive(&tape)?;
                 Ok(Box::new(handle))
             }
             ty => bail!("unknown drive type '{}' - internal error", ty),
@@ -339,7 +377,7 @@ pub fn request_and_load_media(
     config: &SectionConfigData,
     drive: &str,
     label: &MediaLabel,
-    notify_email: &Option<String>,
+    notification_mode: &TapeNotificationMode,
 ) -> Result<(Box<dyn TapeDriver>, MediaId), Error> {
     let check_label = |handle: &mut dyn TapeDriver, uuid: &proxmox_uuid::Uuid| {
         if let Ok((Some(media_id), _)) = handle.read_label() {
@@ -399,15 +437,14 @@ pub fn request_and_load_media(
                                     device_type,
                                     device
                                 );
-                                if let Some(to) = notify_email {
-                                    send_load_media_email(
-                                        changer.is_some(),
-                                        device,
-                                        &label_text,
-                                        to,
-                                        Some(new.to_string()),
-                                    )?;
-                                }
+                                send_load_media_notification(
+                                    notification_mode,
+                                    changer.is_some(),
+                                    device,
+                                    &label_text,
+                                    Some(new.to_string()),
+                                )?;
+
                                 *old = new;
                             }
                             Ok(())
@@ -449,7 +486,7 @@ pub fn request_and_load_media(
                             }
                         }
 
-                        let mut handle = match open_lto_tape_drive(&drive_config) {
+                        let mut handle = match LtoTapeHandle::open_lto_drive(&drive_config) {
                             Ok(handle) => handle,
                             Err(err) => {
                                 update_and_log_request_error(
@@ -572,7 +609,9 @@ fn tape_device_path(config: &SectionConfigData, drive: &str) -> Result<String, E
     }
 }
 
-pub struct DeviceLockGuard(std::fs::File);
+pub struct DeviceLockGuard {
+    _file: std::fs::File,
+}
 
 // Uses systemd escape_unit to compute a file name from `device_path`, the try
 // to lock `/var/lock/<name>`.
@@ -610,7 +649,7 @@ fn lock_device_path(device_path: &str) -> Result<DeviceLockGuard, TapeLockError>
         }
     }
 
-    Ok(DeviceLockGuard(file))
+    Ok(DeviceLockGuard { _file: file })
 }
 
 // Same logic as lock_device_path, but uses a timeout of 0, making it

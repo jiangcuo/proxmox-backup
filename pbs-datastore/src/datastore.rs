@@ -20,10 +20,10 @@ use proxmox_sys::{task_log, task_warn};
 
 use pbs_api_types::{
     Authid, BackupNamespace, BackupType, ChunkOrder, DataStoreConfig, DatastoreFSyncLevel,
-    DatastoreTuning, GarbageCollectionStatus, Operation, UPID,
+    DatastoreTuning, GarbageCollectionStatus, MaintenanceMode, MaintenanceType, Operation, UPID,
 };
 
-use crate::backup_info::{BackupDir, BackupGroup};
+use crate::backup_info::{BackupDir, BackupGroup, BackupGroupDeleteStats};
 use crate::chunk_store::ChunkStore;
 use crate::dynamic_index::{DynamicIndexReader, DynamicIndexWriter};
 use crate::fixed_index::{FixedIndexReader, FixedIndexWriter};
@@ -104,8 +104,26 @@ impl Clone for DataStore {
 impl Drop for DataStore {
     fn drop(&mut self) {
         if let Some(operation) = self.operation {
-            if let Err(e) = update_active_operations(self.name(), operation, -1) {
-                log::error!("could not update active operations - {}", e);
+            let mut last_task = false;
+            match update_active_operations(self.name(), operation, -1) {
+                Err(e) => log::error!("could not update active operations - {}", e),
+                Ok(updated_operations) => {
+                    last_task = updated_operations.read + updated_operations.write == 0;
+                }
+            }
+
+            // remove datastore from cache iff
+            //  - last task finished, and
+            //  - datastore is in a maintenance mode that mandates it
+            let remove_from_cache = last_task
+                && pbs_config::datastore::config()
+                    .and_then(|(s, _)| s.lookup::<DataStoreConfig>("datastore", self.name()))
+                    .map_or(false, |c| {
+                        c.get_maintenance_mode().map_or(false, |m| m.is_offline())
+                    });
+
+            if remove_from_cache {
+                DATASTORE_MAP.lock().unwrap().remove(self.name());
             }
         }
     }
@@ -190,6 +208,24 @@ impl DataStore {
         let mut map = DATASTORE_MAP.lock().unwrap();
         // removes all elements that are not in the config
         map.retain(|key, _| config.sections.contains_key(key));
+        Ok(())
+    }
+
+    /// trigger clearing cache entry based on maintenance mode. Entry will only
+    /// be cleared iff there is no other task running, if there is, the end of the
+    /// last running task will trigger the clearing of the cache entry.
+    pub fn update_datastore_cache(name: &str) -> Result<(), Error> {
+        let (config, _digest) = pbs_config::datastore::config()?;
+        let datastore: DataStoreConfig = config.lookup("datastore", name)?;
+        if datastore
+            .get_maintenance_mode()
+            .map_or(false, |m| m.is_offline())
+        {
+            // the datastore drop handler does the checking if tasks are running and clears the
+            // cache entry, so we just have to trigger it here
+            let _ = DataStore::lookup_datastore(name, Some(Operation::Lookup));
+        }
+
         Ok(())
     }
 
@@ -464,8 +500,8 @@ impl DataStore {
         let mut removed_all_groups = true;
 
         for group in self.iter_backup_groups(ns.to_owned())? {
-            let removed_group = group?.destroy()?;
-            removed_all_groups = removed_all_groups && removed_group;
+            let delete_stats = group?.destroy()?;
+            removed_all_groups = removed_all_groups && delete_stats.all_removed();
         }
 
         let base_file = std::fs::File::open(self.base_path())?;
@@ -545,12 +581,13 @@ impl DataStore {
 
     /// Remove a complete backup group including all snapshots.
     ///
-    /// Returns true if all snapshots were removed, and false if some were protected
+    /// Returns `BackupGroupDeleteStats`, containing the number of deleted snapshots
+    /// and number of protected snaphsots, which therefore were not removed.
     pub fn remove_backup_group(
         self: &Arc<Self>,
         ns: &BackupNamespace,
         backup_group: &pbs_api_types::BackupGroup,
-    ) -> Result<bool, Error> {
+    ) -> Result<BackupGroupDeleteStats, Error> {
         let backup_group = self.backup_group(ns.clone(), backup_group.clone());
 
         backup_group.destroy()
@@ -602,7 +639,10 @@ impl DataStore {
     ) -> Result<Authid, Error> {
         let full_path = self.owner_path(ns, backup_group);
         let owner = proxmox_sys::fs::file_read_firstline(full_path)?;
-        owner.trim_end().parse() // remove trailing newline
+        owner
+            .trim_end() // remove trailing newline
+            .parse()
+            .map_err(|err| format_err!("parsing owner for {backup_group} failed: {err}"))
     }
 
     pub fn owns_backup(
@@ -1019,7 +1059,7 @@ impl DataStore {
     }
 
     pub fn garbage_collection_running(&self) -> bool {
-        !matches!(self.inner.gc_mutex.try_lock(), Ok(_))
+        self.inner.gc_mutex.try_lock().is_err()
     }
 
     pub fn garbage_collection(
@@ -1350,7 +1390,11 @@ impl DataStore {
         let (mut config, _digest) = pbs_config::datastore::config()?;
         let mut datastore_config: DataStoreConfig = config.lookup("datastore", name)?;
 
-        datastore_config.maintenance_mode = Some("type=delete".to_string());
+        datastore_config.set_maintenance_mode(Some(MaintenanceMode {
+            ty: MaintenanceType::Delete,
+            message: None,
+        }))?;
+
         config.set_data(name, "datastore", &datastore_config)?;
         pbs_config::datastore::save_config(&config)?;
         drop(config_lock);

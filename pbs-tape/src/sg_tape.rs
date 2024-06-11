@@ -9,10 +9,14 @@ use endian_trait::Endian;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 
 mod encryption;
-pub use encryption::*;
+pub use encryption::{drive_get_encryption, drive_set_encryption};
 
 mod volume_statistics;
+use proxmox_uuid::Uuid;
 pub use volume_statistics::*;
+
+mod device_status;
+pub use device_status::*;
 
 mod tape_alert_flags;
 pub use tape_alert_flags::*;
@@ -26,8 +30,12 @@ pub use report_density::*;
 use proxmox_io::{ReadExt, WriteExt};
 use proxmox_sys::error::SysResult;
 
-use pbs_api_types::{Lp17VolumeStatistics, LtoDriveAndMediaStatus, MamAttribute, TapeDensity};
+use pbs_api_types::{
+    DeviceActivity, Lp17VolumeStatistics, LtoDriveAndMediaStatus, LtoTapeDrive, MamAttribute,
+    TapeDensity,
+};
 
+use crate::linux_list_drives::open_lto_tape_device;
 use crate::{
     sgutils2::{
         alloc_page_aligned_buffer, scsi_cmd_mode_select10, scsi_cmd_mode_select6, scsi_inquiry,
@@ -102,7 +110,6 @@ pub struct SgTape {
     file: File,
     locate_offset: Option<i64>,
     info: InquiryInfo,
-    encryption_key_loaded: bool,
 }
 
 impl SgTape {
@@ -124,9 +131,51 @@ impl SgTape {
         Ok(Self {
             file,
             info,
-            encryption_key_loaded: false,
             locate_offset: None,
         })
+    }
+
+    /// Open a tape device
+    ///
+    /// This does additional checks:
+    ///
+    /// - check if it is a non-rewinding tape device
+    /// - check if drive is ready (tape loaded)
+    /// - check block size
+    /// - for autoloader only, try to reload ejected tapes
+    pub fn open_lto_drive(config: &LtoTapeDrive) -> Result<Self, Error> {
+        proxmox_lang::try_block!({
+            let file = open_lto_tape_device(&config.path)?;
+
+            let mut handle = SgTape::new(file)?;
+
+            if handle.test_unit_ready().is_err() {
+                // for autoloader only, try to reload ejected tapes
+                if config.changer.is_some() {
+                    let _ = handle.load(); // just try, ignore error
+                }
+            }
+
+            handle.wait_until_ready(None)?;
+
+            handle.set_default_options()?;
+
+            Ok(handle)
+        })
+        .map_err(|err: Error| {
+            format_err!(
+                "open drive '{}' ({}) failed - {}",
+                config.name,
+                config.path,
+                err
+            )
+        })
+    }
+
+    /// Read device activity
+    pub fn device_activity(config: &LtoTapeDrive) -> Result<DeviceActivity, Error> {
+        let mut file = open_lto_tape_device(&config.path)?;
+        read_device_activity(&mut file)
     }
 
     /// Access to file descriptor - useful for testing
@@ -245,6 +294,8 @@ impl SgTape {
                 // we also do this for LTO9+ to avoid reinitialization on FORMAT(04h)
                 self.erase_media(fast)?
             }
+
+            self.clear_mam_attributes();
 
             Ok(())
         }
@@ -612,10 +663,28 @@ impl SgTape {
         read_volume_statistics(&mut self.file)
     }
 
-    pub fn set_encryption(&mut self, key: Option<[u8; 32]>) -> Result<(), Error> {
-        self.encryption_key_loaded = key.is_some();
+    pub fn set_encryption(&mut self, key_data: Option<([u8; 32], Uuid)>) -> Result<(), Error> {
+        let key = if let Some((ref key, ref uuid)) = key_data {
+            // derive specialized key for each media-set
 
-        set_encryption(&mut self.file, key)
+            let mut tape_key = [0u8; 32];
+
+            let uuid_bytes: [u8; 16] = *uuid.as_bytes();
+
+            openssl::pkcs5::pbkdf2_hmac(
+                key,
+                &uuid_bytes,
+                10,
+                openssl::hash::MessageDigest::sha256(),
+                &mut tape_key,
+            )?;
+
+            Some(tape_key)
+        } else {
+            None
+        };
+
+        drive_set_encryption(&mut self.file, key)
     }
 
     // Note: use alloc_page_aligned_buffer to alloc data transfer buffer
@@ -900,10 +969,19 @@ impl SgTape {
     pub fn get_drive_and_media_status(&mut self) -> Result<LtoDriveAndMediaStatus, Error> {
         let drive_status = self.read_drive_status()?;
 
-        let alert_flags = self
-            .tape_alert_flags()
-            .map(|flags| format!("{:?}", flags))
-            .ok();
+        let drive_activity = read_device_activity(&mut self.file).ok();
+
+        // some operations block when the tape moves, which can take up to 2 hours
+        // (e.g. for calibrating) so skip those queries while it's doing that
+        let is_moving = !matches!(drive_activity, None | Some(DeviceActivity::NoActivity));
+
+        let alert_flags = if !is_moving {
+            self.tape_alert_flags()
+                .map(|flags| format!("{:?}", flags))
+                .ok()
+        } else {
+            None
+        };
 
         let mut status = LtoDriveAndMediaStatus {
             vendor: self.info().vendor.clone(),
@@ -923,6 +1001,7 @@ impl SgTape {
             medium_passes: None,
             medium_wearout: None,
             volume_mounts: None,
+            drive_activity,
         };
 
         if self.test_unit_ready().is_ok() {
@@ -930,10 +1009,12 @@ impl SgTape {
                 status.write_protect = Some(drive_status.write_protect);
             }
 
-            let position = self.position()?;
+            if !is_moving {
+                let position = self.position()?;
 
-            status.file_number = Some(position.logical_file_id);
-            status.block_number = Some(position.logical_object_number);
+                status.file_number = Some(position.logical_file_id);
+                status.block_number = Some(position.logical_object_number);
+            }
 
             if let Ok(mam) = self.cartridge_memory() {
                 match mam_extract_media_usage(&mam) {
@@ -947,33 +1028,58 @@ impl SgTape {
                     }
                 }
 
-                if let Ok(volume_stats) = self.volume_statistics() {
-                    let passes = std::cmp::max(
-                        volume_stats.beginning_of_medium_passes,
-                        volume_stats.middle_of_tape_passes,
-                    );
+                if !is_moving {
+                    if let Ok(volume_stats) = self.volume_statistics() {
+                        let passes = std::cmp::max(
+                            volume_stats.beginning_of_medium_passes,
+                            volume_stats.middle_of_tape_passes,
+                        );
 
-                    // assume max. 16000 medium passes
-                    // see: https://en.wikipedia.org/wiki/Linear_Tape-Open
-                    let wearout: f64 = (passes as f64) / 16000.0_f64;
+                        // assume max. 16000 medium passes
+                        // see: https://en.wikipedia.org/wiki/Linear_Tape-Open
+                        let wearout: f64 = (passes as f64) / 16000.0_f64;
 
-                    status.medium_passes = Some(passes);
-                    status.medium_wearout = Some(wearout);
+                        status.medium_passes = Some(passes);
+                        status.medium_wearout = Some(wearout);
 
-                    status.volume_mounts = Some(volume_stats.volume_mounts);
+                        status.volume_mounts = Some(volume_stats.volume_mounts);
+                    }
                 }
             }
         }
 
         Ok(status)
     }
-}
 
-impl Drop for SgTape {
-    fn drop(&mut self) {
-        // For security reasons, clear the encryption key
-        if self.encryption_key_loaded {
-            let _ = self.set_encryption(None);
+    /// Tries to write useful attributes to the MAM like Vendor/Application/Version
+    pub fn write_mam_attributes(&mut self, label: Option<String>, pool: Option<String>) {
+        use pbs_buildcfg::PROXMOX_BACKUP_CRATE_VERSION;
+        let mut attribute_list: Vec<(u16, &[u8])> = vec![
+            (0x08_00, b"Proxmox"),               // APPLICATION VENDOR, 8 bytes
+            (0x08_01, b"Proxmox Backup Server"), // APPLICATION NAME, 32 bytes
+            (0x08_02, PROXMOX_BACKUP_CRATE_VERSION.as_bytes()), // APPLICATION VERSION, 8 bytes
+        ];
+        if let Some(ref label) = label {
+            attribute_list.push((0x08_03, label.as_bytes())); // USER MEDIUM TEXT LABEL, 160 bytes
+        }
+
+        if let Some(ref pool) = pool {
+            attribute_list.push((0x08_08, pool.as_bytes())); // MEDIA POOL, 160 bytes
+        }
+
+        for (id, data) in attribute_list {
+            if let Err(err) = write_mam_attribute(&mut self.file, id, data) {
+                log::warn!("could not set MAM Attribute {id:x}: {err}");
+            }
+        }
+    }
+
+    // clear all custom set mam attributes
+    fn clear_mam_attributes(&mut self) {
+        for attr in [0x08_00, 0x08_01, 0x08_02, 0x08_03, 0x08_08] {
+            if let Err(err) = write_mam_attribute(&mut self.file, attr, b"") {
+                log::warn!("could not clear MAM attribute {attr:x}: {err}");
+            }
         }
     }
 }

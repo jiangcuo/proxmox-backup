@@ -58,8 +58,7 @@ Ext.define('PBS.DataStorePanel', {
 	    },
 	},
 	{
-	    title: gettext('Prune & GC'),
-	    xtype: 'pbsDatastorePruneAndGC',
+	    xtype: 'pbsPruneAndGC',
 	    itemId: 'prunegc',
 	    iconCls: 'fa fa-trash-o',
 	    cbind: {

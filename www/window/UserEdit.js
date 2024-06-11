@@ -66,7 +66,6 @@ Ext.define('PBS.window.UserEdit', {
 		fieldLabel: gettext('User name'),
 		renderer: Ext.htmlEncode,
 		allowBlank: false,
-		minLength: 4,
 		cbind: {
 		    editable: '{isCreate}',
 		},
@@ -181,20 +180,18 @@ Ext.define('PBS.window.UserEdit', {
     },
 
     getValues: function(dirtyOnly) {
-	var me = this;
+	let me = this;
 
-	var values = me.callParent(arguments);
+	let values = me.callParent(arguments);
 
-	// hack: ExtJS datefield does not submit 0, so we need to set that
 	if (!values.expire) {
-	    values.expire = 0;
+	    values.expire = 0; // "no expiry" is encoded as 0, so set that explicitly if left empty
 	}
 
 	if (me.isCreate) {
 	    values.userid = values.userid + '@' + values.realm;
+	    delete values.realm;
 	}
-
-	delete values.username;
 
 	if (!values.password) {
 	    delete values.password;

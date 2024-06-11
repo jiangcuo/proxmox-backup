@@ -99,7 +99,7 @@ to write to your tape at full speed, please make sure that the source
 datastore is able to deliver that performance (for example, by using SSDs).
 
 LTO-9+ considerations
-~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~
 
 Since LTO-9, it is necessary to initialize new media in your drives, this is
 called `Media Optimization`. This usually takes between 40 and 120 minutes per
@@ -558,8 +558,6 @@ a single media pool, so a job only uses tapes from that pool.
         media set.
 
    - Create a new set when the specified Calendar Event triggers.
-
-     .. _systemd.time manpage: https://manpages.debian.org/buster/systemd/systemd.time.7.en.html
 
      This allows you to specify points in time by using systemd like
      Calendar Event specifications (see `systemd.time manpage`_).

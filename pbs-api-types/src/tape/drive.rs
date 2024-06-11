@@ -93,6 +93,9 @@ pub struct DriveListEntry {
     /// the state of the drive if locked
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// Current device activity
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<DeviceActivity>,
 }
 
 #[api()]
@@ -216,6 +219,9 @@ pub struct LtoDriveAndMediaStatus {
     /// Estimated tape wearout factor (assuming max. 16000 end-to-end passes)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub medium_wearout: Option<f64>,
+    /// Current device activity
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drive_activity: Option<DeviceActivity>,
 }
 
 #[api()]
@@ -275,4 +281,69 @@ pub struct Lp17VolumeStatistics {
     pub middle_of_tape_passes: u64,
     /// Volume serial number
     pub serial: String,
+}
+
+/// The DT Device Activity from DT Device Status LP page
+#[api]
+#[derive(Copy, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeviceActivity {
+    /// No activity
+    NoActivity,
+    /// Cleaning
+    Cleaning,
+    /// Loading
+    Loading,
+    /// Unloading
+    Unloading,
+    /// Other unspecified activity
+    Other,
+    /// Reading
+    Reading,
+    /// Writing
+    Writing,
+    /// Locating
+    Locating,
+    /// Rewinding
+    Rewinding,
+    /// Erasing
+    Erasing,
+    /// Formatting
+    Formatting,
+    /// Calibrating
+    Calibrating,
+    /// Other (DT)
+    OtherDT,
+    /// Updating microcode
+    MicrocodeUpdate,
+    /// Reading encrypted data
+    ReadingEncrypted,
+    /// Writing encrypted data
+    WritingEncrypted,
+}
+
+impl TryFrom<u8> for DeviceActivity {
+    type Error = Error;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(match value {
+            0x00 => DeviceActivity::NoActivity,
+            0x01 => DeviceActivity::Cleaning,
+            0x02 => DeviceActivity::Loading,
+            0x03 => DeviceActivity::Unloading,
+            0x04 => DeviceActivity::Other,
+            0x05 => DeviceActivity::Reading,
+            0x06 => DeviceActivity::Writing,
+            0x07 => DeviceActivity::Locating,
+            0x08 => DeviceActivity::Rewinding,
+            0x09 => DeviceActivity::Erasing,
+            0x0A => DeviceActivity::Formatting,
+            0x0B => DeviceActivity::Calibrating,
+            0x0C => DeviceActivity::OtherDT,
+            0x0D => DeviceActivity::MicrocodeUpdate,
+            0x0E => DeviceActivity::ReadingEncrypted,
+            0x0F => DeviceActivity::WritingEncrypted,
+            other => bail!("invalid DT device activity value: {:x}", other),
+        })
+    }
 }

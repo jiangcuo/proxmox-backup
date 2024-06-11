@@ -1158,7 +1158,7 @@ pub fn wipe_blockdev(disk: &Disk, worker: Arc<WorkerTask>) -> Result<(), Error> 
         of_path,
         "bs=1M".into(),
         "conv=fdatasync".into(),
-        count_str.into(),
+        count_str,
     ];
     dd_command.args(args);
 
@@ -1167,7 +1167,7 @@ pub fn wipe_blockdev(disk: &Disk, worker: Arc<WorkerTask>) -> Result<(), Error> 
 
     if is_partition {
         // set the partition type to 0x83 'Linux filesystem'
-        change_parttype(&disk, "8300", worker)?;
+        change_parttype(disk, "8300", worker)?;
     }
 
     Ok(())

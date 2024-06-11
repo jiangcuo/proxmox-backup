@@ -45,7 +45,7 @@ Ext.define('PBS.TapeManagement.DriveStatus', {
 	onLoad: function() {
 	    let me = this;
 	    let statusgrid = me.lookup('statusgrid');
-	    let online = statusgrid.getObjectValue('file-number') !== undefined;
+	    let online = statusgrid.getObjectValue('file-number') !== undefined || statusgrid.getObjectValue('manufactured');
 	    let vm = me.getViewModel();
 	    vm.set('online', online);
 	    let title = online ? gettext('Status') : gettext('Status (No Tape loaded)');
@@ -347,6 +347,10 @@ Ext.define('PBS.TapeManagement.DriveStatusGrid', {
 	    required: true,
 	    header: gettext('Compression'),
 	    renderer: Proxmox.Utils.format_boolean,
+	},
+	'drive-activity': {
+	    header: gettext('Drive Activity'),
+	    renderer: PBS.Utils.renderDriveActivity,
 	},
 	'file-number': {
 	    header: gettext('Tape Position'),

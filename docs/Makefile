@@ -11,6 +11,8 @@ GENERATED_SYNOPSIS := 						\
 	pmtx/synopsis.rst					\
 	pmt/synopsis.rst					\
 	config/media-pool/config.rst				\
+	config/notifications/config.rst				\
+	config/notifications-priv/config.rst				\
 	config/tape/config.rst					\
 	config/tape-job/config.rst				\
 	config/user/config.rst					\
@@ -43,7 +45,9 @@ MAN5_PAGES :=				\
 	sync.cfg.5			\
 	verification.cfg.5		\
 	datastore.cfg.5			\
-	domains.cfg.5
+	domains.cfg.5			\
+	notifications.cfg.5		\
+	notifications-priv.cfg.5	\
 
 PRUNE_SIMULATOR_FILES := 					\
 	prune-simulator/index.html				\
@@ -138,9 +142,9 @@ lto-barcode/lto-barcode-generator.js: ${LTO_BARCODE_JS_SOURCE}
 	mv $@.tmp $@
 
 .PHONY: html
-html: ${GENERATED_SYNOPSIS} images/proxmox-logo.svg custom.css conf.py ${PRUNE_SIMULATOR_FILES} ${LTO_BARCODE_FILES} ${API_VIEWER_SOURCES}
+html: ${GENERATED_SYNOPSIS} images/proxmox-logo.svg _static/custom.css conf.py ${PRUNE_SIMULATOR_FILES} ${LTO_BARCODE_FILES} ${API_VIEWER_SOURCES}
 	$(SPHINXBUILD) -b html $(ALLSPHINXOPTS) $(BUILDDIR)/html
-	install -m 0644 custom.js custom.css images/proxmox-logo.svg $(BUILDDIR)/html/_static/
+	install -m 0644 _static/custom.js _static/custom.css images/proxmox-logo.svg $(BUILDDIR)/html/_static/
 	install -dm 0755 $(BUILDDIR)/html/prune-simulator
 	install -m 0644 ${PRUNE_SIMULATOR_FILES} $(BUILDDIR)/html/prune-simulator
 	install -dm 0755 $(BUILDDIR)/html/lto-barcode

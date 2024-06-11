@@ -9,17 +9,20 @@ use std::pin::Pin;
 use anyhow::{bail, Error};
 use futures::Future;
 use once_cell::sync::{Lazy, OnceCell};
+use pbs_config::open_backup_lockfile;
 use proxmox_router::http_bail;
 use serde_json::json;
 
 use proxmox_auth_api::api::{Authenticator, LockedTfaConfig};
 use proxmox_auth_api::ticket::{Empty, Ticket};
 use proxmox_auth_api::types::Authid;
-use proxmox_auth_api::Keyring;
+use proxmox_auth_api::{HMACKey, Keyring};
 use proxmox_ldap::{Config, Connection, ConnectionMode};
 use proxmox_tfa::api::{OpenUserChallengeData, TfaConfig};
 
-use pbs_api_types::{LdapMode, LdapRealmConfig, OpenIdRealmConfig, RealmRef, Userid, UsernameRef};
+use pbs_api_types::{
+    AdRealmConfig, LdapMode, LdapRealmConfig, OpenIdRealmConfig, RealmRef, Userid, UsernameRef,
+};
 use pbs_buildcfg::configdir;
 
 use crate::auth_helpers;
@@ -28,20 +31,33 @@ pub const TERM_PREFIX: &str = "PBSTERM";
 
 struct PbsAuthenticator;
 
-const SHADOW_CONFIG_FILENAME: &str = configdir!("/shadow.json");
+pub(crate) const SHADOW_CONFIG_FILENAME: &str = configdir!("/shadow.json");
+pub(crate) const SHADOW_LOCK_FILENAME: &str = configdir!("/shadow.json.lock");
 
 impl Authenticator for PbsAuthenticator {
     fn authenticate_user<'a>(
-        &self,
+        &'a self,
         username: &'a UsernameRef,
         password: &'a str,
-        _client_ip: Option<&'a IpAddr>,
+        client_ip: Option<&'a IpAddr>,
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
         Box::pin(async move {
             let data = proxmox_sys::fs::file_get_json(SHADOW_CONFIG_FILENAME, Some(json!({})))?;
             match data[username.as_str()].as_str() {
                 None => bail!("no password set"),
-                Some(enc_password) => proxmox_sys::crypt::verify_crypt_pw(password, enc_password)?,
+                Some(enc_password) => {
+                    proxmox_sys::crypt::verify_crypt_pw(password, enc_password)?;
+
+                    // if the password hash is not based on the current hashing function (as
+                    // identified by its prefix), rehash the password.
+                    if !enc_password.starts_with(proxmox_sys::crypt::HASH_PREFIX) {
+                        // only log that we could not upgrade a password, we already know that the
+                        // user has a valid password, no reason the deny to log in attempt.
+                        if let Err(e) = self.store_password(username, password, client_ip) {
+                            log::warn!("could not upgrade a users password! - {e}");
+                        }
+                    }
+                }
             }
             Ok(())
         })
@@ -54,6 +70,8 @@ impl Authenticator for PbsAuthenticator {
         _client_ip: Option<&IpAddr>,
     ) -> Result<(), Error> {
         let enc_password = proxmox_sys::crypt::encrypt_pw(password)?;
+
+        let _guard = open_backup_lockfile(SHADOW_LOCK_FILENAME, None, true);
         let mut data = proxmox_sys::fs::file_get_json(SHADOW_CONFIG_FILENAME, Some(json!({})))?;
         data[username.as_str()] = enc_password.into();
 
@@ -70,6 +88,8 @@ impl Authenticator for PbsAuthenticator {
     }
 
     fn remove_password(&self, username: &UsernameRef) -> Result<(), Error> {
+        let _guard = open_backup_lockfile(SHADOW_LOCK_FILENAME, None, true);
+
         let mut data = proxmox_sys::fs::file_get_json(SHADOW_CONFIG_FILENAME, Some(json!({})))?;
         if let Some(map) = data.as_object_mut() {
             map.remove(username.as_str());
@@ -185,22 +205,7 @@ impl LdapAuthenticator {
             servers.push(server.clone());
         }
 
-        let tls_mode = match config.mode.unwrap_or_default() {
-            LdapMode::Ldap => ConnectionMode::Ldap,
-            LdapMode::StartTls => ConnectionMode::StartTls,
-            LdapMode::Ldaps => ConnectionMode::Ldaps,
-        };
-
-        let (ca_store, trusted_cert) = if let Some(capath) = config.capath.as_deref() {
-            let path = PathBuf::from(capath);
-            if path.is_dir() {
-                (Some(path), None)
-            } else {
-                (None, Some(vec![path]))
-            }
-        } else {
-            (None, None)
-        };
+        let (ca_store, trusted_cert) = lookup_ca_store_or_cert_path(config.capath.as_deref());
 
         Ok(Config {
             servers,
@@ -209,11 +214,106 @@ impl LdapAuthenticator {
             base_dn: config.base_dn.clone(),
             bind_dn: config.bind_dn.clone(),
             bind_password: password,
-            tls_mode,
+            tls_mode: ldap_to_conn_mode(config.mode.unwrap_or_default()),
             verify_certificate: config.verify.unwrap_or_default(),
             additional_trusted_certificates: trusted_cert,
             certificate_store_path: ca_store,
         })
+    }
+}
+
+pub struct AdAuthenticator {
+    config: AdRealmConfig,
+}
+
+impl AdAuthenticator {
+    pub fn api_type_to_config(config: &AdRealmConfig) -> Result<Config, Error> {
+        Self::api_type_to_config_with_password(
+            config,
+            auth_helpers::get_ldap_bind_password(&config.realm)?,
+        )
+    }
+
+    pub fn api_type_to_config_with_password(
+        config: &AdRealmConfig,
+        password: Option<String>,
+    ) -> Result<Config, Error> {
+        let mut servers = vec![config.server1.clone()];
+        if let Some(server) = &config.server2 {
+            servers.push(server.clone());
+        }
+
+        let (ca_store, trusted_cert) = lookup_ca_store_or_cert_path(config.capath.as_deref());
+
+        Ok(Config {
+            servers,
+            port: config.port,
+            user_attr: "sAMAccountName".to_owned(),
+            base_dn: config.base_dn.clone().unwrap_or_default(),
+            bind_dn: config.bind_dn.clone(),
+            bind_password: password,
+            tls_mode: ldap_to_conn_mode(config.mode.unwrap_or_default()),
+            verify_certificate: config.verify.unwrap_or_default(),
+            additional_trusted_certificates: trusted_cert,
+            certificate_store_path: ca_store,
+        })
+    }
+}
+
+impl Authenticator for AdAuthenticator {
+    /// Authenticate user in AD realm
+    fn authenticate_user<'a>(
+        &'a self,
+        username: &'a UsernameRef,
+        password: &'a str,
+        _client_ip: Option<&'a IpAddr>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
+        Box::pin(async move {
+            let ldap_config = Self::api_type_to_config(&self.config)?;
+            let ldap = Connection::new(ldap_config);
+            ldap.authenticate_user(username.as_str(), password).await?;
+            Ok(())
+        })
+    }
+
+    fn store_password(
+        &self,
+        _username: &UsernameRef,
+        _password: &str,
+        _client_ip: Option<&IpAddr>,
+    ) -> Result<(), Error> {
+        http_bail!(
+            NOT_IMPLEMENTED,
+            "storing passwords is not implemented for Active Directory realms"
+        );
+    }
+
+    fn remove_password(&self, _username: &UsernameRef) -> Result<(), Error> {
+        http_bail!(
+            NOT_IMPLEMENTED,
+            "removing passwords is not implemented for Active Directory realms"
+        );
+    }
+}
+
+fn ldap_to_conn_mode(mode: LdapMode) -> ConnectionMode {
+    match mode {
+        LdapMode::Ldap => ConnectionMode::Ldap,
+        LdapMode::StartTls => ConnectionMode::StartTls,
+        LdapMode::Ldaps => ConnectionMode::Ldaps,
+    }
+}
+
+fn lookup_ca_store_or_cert_path(capath: Option<&str>) -> (Option<PathBuf>, Option<Vec<PathBuf>>) {
+    if let Some(capath) = capath {
+        let path = PathBuf::from(capath);
+        if path.is_dir() {
+            (Some(path), None)
+        } else {
+            (None, Some(vec![path]))
+        }
+    } else {
+        (None, None)
     }
 }
 
@@ -228,6 +328,8 @@ pub(crate) fn lookup_authenticator(
             let (domains, _digest) = pbs_config::domains::config()?;
             if let Ok(config) = domains.lookup::<LdapRealmConfig>("ldap", realm) {
                 Ok(Box::new(LdapAuthenticator { config }))
+            } else if let Ok(config) = domains.lookup::<AdRealmConfig>("ad", realm) {
+                Ok(Box::new(AdAuthenticator { config }))
             } else if domains.lookup::<OpenIdRealmConfig>("openid", realm).is_ok() {
                 Ok(Box::new(OpenIdAuthenticator()))
             } else {
@@ -252,9 +354,9 @@ pub(crate) fn authenticate_user<'a>(
 }
 
 static PRIVATE_KEYRING: Lazy<Keyring> =
-    Lazy::new(|| Keyring::with_private_key(crate::auth_helpers::private_auth_key().clone().into()));
+    Lazy::new(|| Keyring::with_private_key(crate::auth_helpers::private_auth_key().clone()));
 static PUBLIC_KEYRING: Lazy<Keyring> =
-    Lazy::new(|| Keyring::with_public_key(crate::auth_helpers::public_auth_key().clone().into()));
+    Lazy::new(|| Keyring::with_public_key(crate::auth_helpers::public_auth_key().clone()));
 static AUTH_CONTEXT: OnceCell<PbsAuthContext> = OnceCell::new();
 
 pub fn setup_auth_context(use_private_key: bool) {
@@ -267,7 +369,7 @@ pub fn setup_auth_context(use_private_key: bool) {
     AUTH_CONTEXT
         .set(PbsAuthContext {
             keyring,
-            csrf_secret: crate::auth_helpers::csrf_secret().to_vec(),
+            csrf_secret: crate::auth_helpers::csrf_secret(),
         })
         .map_err(drop)
         .expect("auth context setup twice");
@@ -285,7 +387,7 @@ pub(crate) fn public_auth_keyring() -> &'static Keyring {
 
 struct PbsAuthContext {
     keyring: &'static Keyring,
-    csrf_secret: Vec<u8>,
+    csrf_secret: &'static HMACKey,
 }
 
 impl proxmox_auth_api::api::AuthContext for PbsAuthContext {
@@ -321,14 +423,14 @@ impl proxmox_auth_api::api::AuthContext for PbsAuthContext {
     /// Access the TFA config with an exclusive lock.
     fn tfa_config_write_lock(&self) -> Result<Box<dyn LockedTfaConfig>, Error> {
         Ok(Box::new(PbsLockedTfaConfig {
-            _lock: crate::config::tfa::read_lock()?,
+            _lock: crate::config::tfa::write_lock()?,
             config: crate::config::tfa::read()?,
         }))
     }
 
     /// CSRF prevention token secret data.
-    fn csrf_secret(&self) -> &[u8] {
-        &self.csrf_secret
+    fn csrf_secret(&self) -> &'static HMACKey {
+        self.csrf_secret
     }
 
     /// Verify a token secret.

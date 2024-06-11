@@ -16,7 +16,7 @@ use proxmox_router::{
 use proxmox_schema::{api, param_bail};
 use proxmox_sys::{task_log, task_warn};
 
-use proxmox_acme::account::AccountData as AcmeAccountData;
+use proxmox_acme::types::AccountData as AcmeAccountData;
 use proxmox_acme::Account;
 
 use pbs_api_types::{Authid, PRIV_SYS_MODIFY};
@@ -489,9 +489,11 @@ pub struct PluginConfig {
     ty: String,
 
     /// DNS Api name.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     api: Option<String>,
 
     /// Plugin configuration data.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     data: Option<String>,
 
     /// Extra delay in seconds to wait before requesting validation.

@@ -5,10 +5,11 @@ use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, format_err, Error};
 use http::StatusCode;
+use proxmox_human_byte::HumanByte;
 use proxmox_rest_server::WorkerTask;
 use proxmox_router::HttpError;
 use proxmox_sys::{task_log, task_warn};
@@ -62,6 +63,54 @@ pub(crate) struct RemoteSource {
 pub(crate) struct LocalSource {
     store: Arc<DataStore>,
     ns: BackupNamespace,
+}
+
+#[derive(Default)]
+pub(crate) struct RemovedVanishedStats {
+    pub(crate) groups: usize,
+    pub(crate) snapshots: usize,
+    pub(crate) namespaces: usize,
+}
+
+impl RemovedVanishedStats {
+    fn add(&mut self, rhs: RemovedVanishedStats) {
+        self.groups += rhs.groups;
+        self.snapshots += rhs.snapshots;
+        self.namespaces += rhs.namespaces;
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct PullStats {
+    pub(crate) chunk_count: usize,
+    pub(crate) bytes: usize,
+    pub(crate) elapsed: Duration,
+    pub(crate) removed: Option<RemovedVanishedStats>,
+}
+
+impl From<RemovedVanishedStats> for PullStats {
+    fn from(removed: RemovedVanishedStats) -> Self {
+        Self {
+            removed: Some(removed),
+            ..Default::default()
+        }
+    }
+}
+
+impl PullStats {
+    fn add(&mut self, rhs: PullStats) {
+        self.chunk_count += rhs.chunk_count;
+        self.bytes += rhs.bytes;
+        self.elapsed += rhs.elapsed;
+
+        if let Some(rhs_removed) = rhs.removed {
+            if let Some(ref mut removed) = self.removed {
+                removed.add(rhs_removed);
+            } else {
+                self.removed = Some(rhs_removed);
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -199,7 +248,7 @@ impl PullSource for RemoteSource {
         });
 
         if !namespace.is_root() {
-            args["ns"] = serde_json::to_value(&namespace)?;
+            args["ns"] = serde_json::to_value(namespace)?;
         }
 
         self.client.login().await?;
@@ -230,7 +279,7 @@ impl PullSource for RemoteSource {
     }
 
     fn get_store(&self) -> &str {
-        &self.repo.store()
+        self.repo.store()
     }
 
     async fn reader(
@@ -486,7 +535,7 @@ pub(crate) struct PullParameters {
     /// How many levels of sub-namespaces to pull (0 == no recursion, None == maximum recursion)
     max_depth: Option<usize>,
     /// Filters for reducing the pull scope
-    group_filter: Option<Vec<GroupFilter>>,
+    group_filter: Vec<GroupFilter>,
     /// How many snapshots should be transferred at most (taking the newest N snapshots)
     transfer_last: Option<usize>,
 }
@@ -539,6 +588,8 @@ impl PullParameters {
             ns,
         };
 
+        let group_filter = group_filter.unwrap_or_default();
+
         Ok(Self {
             source,
             target,
@@ -557,7 +608,7 @@ async fn pull_index_chunks<I: IndexFile>(
     target: Arc<DataStore>,
     index: I,
     downloaded_chunks: Arc<Mutex<HashSet<[u8; 32]>>>,
-) -> Result<(), Error> {
+) -> Result<PullStats, Error> {
     use futures::stream::{self, StreamExt, TryStreamExt};
 
     let start_time = SystemTime::now();
@@ -592,12 +643,14 @@ async fn pull_index_chunks<I: IndexFile>(
     let verify_and_write_channel = verify_pool.channel();
 
     let bytes = Arc::new(AtomicUsize::new(0));
+    let chunk_count = Arc::new(AtomicUsize::new(0));
 
     stream
         .map(|info| {
             let target = Arc::clone(&target);
             let chunk_reader = chunk_reader.clone();
             let bytes = Arc::clone(&bytes);
+            let chunk_count = Arc::clone(&chunk_count);
             let verify_and_write_channel = verify_and_write_channel.clone();
 
             Ok::<_, Error>(async move {
@@ -618,6 +671,7 @@ async fn pull_index_chunks<I: IndexFile>(
                 })?;
 
                 bytes.fetch_add(raw_size, Ordering::SeqCst);
+                chunk_count.fetch_add(1, Ordering::SeqCst);
 
                 Ok(())
             })
@@ -630,18 +684,24 @@ async fn pull_index_chunks<I: IndexFile>(
 
     verify_pool.complete()?;
 
-    let elapsed = start_time.elapsed()?.as_secs_f64();
+    let elapsed = start_time.elapsed()?;
 
     let bytes = bytes.load(Ordering::SeqCst);
+    let chunk_count = chunk_count.load(Ordering::SeqCst);
 
     task_log!(
         worker,
-        "downloaded {} bytes ({:.2} MiB/s)",
-        bytes,
-        (bytes as f64) / (1024.0 * 1024.0 * elapsed)
+        "downloaded {} ({}/s)",
+        HumanByte::from(bytes),
+        HumanByte::new_binary(bytes as f64 / elapsed.as_secs_f64()),
     );
 
-    Ok(())
+    Ok(PullStats {
+        chunk_count,
+        bytes,
+        elapsed,
+        removed: None,
+    })
 }
 
 fn verify_archive(info: &FileInfo, csum: &[u8; 32], size: u64) -> Result<(), Error> {
@@ -675,13 +735,15 @@ async fn pull_single_archive<'a>(
     snapshot: &'a pbs_datastore::BackupDir,
     archive_info: &'a FileInfo,
     downloaded_chunks: Arc<Mutex<HashSet<[u8; 32]>>>,
-) -> Result<(), Error> {
+) -> Result<PullStats, Error> {
     let archive_name = &archive_info.filename;
     let mut path = snapshot.full_path();
     path.push(archive_name);
 
     let mut tmp_path = path.clone();
     tmp_path.set_extension("tmp");
+
+    let mut pull_stats = PullStats::default();
 
     task_log!(worker, "sync archive {}", archive_name);
 
@@ -702,7 +764,7 @@ async fn pull_single_archive<'a>(
             if reader.skip_chunk_sync(snapshot.datastore().name()) {
                 task_log!(worker, "skipping chunk sync for same datastore");
             } else {
-                pull_index_chunks(
+                let stats = pull_index_chunks(
                     worker,
                     reader.chunk_reader(archive_info.crypt_mode),
                     snapshot.datastore().clone(),
@@ -710,6 +772,7 @@ async fn pull_single_archive<'a>(
                     downloaded_chunks,
                 )
                 .await?;
+                pull_stats.add(stats);
             }
         }
         ArchiveType::FixedIndex => {
@@ -722,7 +785,7 @@ async fn pull_single_archive<'a>(
             if reader.skip_chunk_sync(snapshot.datastore().name()) {
                 task_log!(worker, "skipping chunk sync for same datastore");
             } else {
-                pull_index_chunks(
+                let stats = pull_index_chunks(
                     worker,
                     reader.chunk_reader(archive_info.crypt_mode),
                     snapshot.datastore().clone(),
@@ -730,6 +793,7 @@ async fn pull_single_archive<'a>(
                     downloaded_chunks,
                 )
                 .await?;
+                pull_stats.add(stats);
             }
         }
         ArchiveType::Blob => {
@@ -741,7 +805,7 @@ async fn pull_single_archive<'a>(
     if let Err(err) = std::fs::rename(&tmp_path, &path) {
         bail!("Atomic rename file {:?} failed - {}", path, err);
     }
-    Ok(())
+    Ok(pull_stats)
 }
 
 /// Actual implementation of pulling a snapshot.
@@ -758,7 +822,8 @@ async fn pull_snapshot<'a>(
     reader: Arc<dyn PullReader + 'a>,
     snapshot: &'a pbs_datastore::BackupDir,
     downloaded_chunks: Arc<Mutex<HashSet<[u8; 32]>>>,
-) -> Result<(), Error> {
+) -> Result<PullStats, Error> {
+    let mut pull_stats = PullStats::default();
     let mut manifest_name = snapshot.full_path();
     manifest_name.push(MANIFEST_BLOB_NAME);
 
@@ -774,7 +839,7 @@ async fn pull_snapshot<'a>(
     {
         tmp_manifest_blob = data;
     } else {
-        return Ok(());
+        return Ok(pull_stats);
     }
 
     if manifest_name.exists() {
@@ -798,7 +863,7 @@ async fn pull_snapshot<'a>(
             };
             task_log!(worker, "no data changes");
             let _ = std::fs::remove_file(&tmp_manifest_name);
-            return Ok(()); // nothing changed
+            return Ok(pull_stats); // nothing changed
         }
     }
 
@@ -843,7 +908,7 @@ async fn pull_snapshot<'a>(
             }
         }
 
-        pull_single_archive(
+        let stats = pull_single_archive(
             worker,
             reader.clone(),
             snapshot,
@@ -851,6 +916,7 @@ async fn pull_snapshot<'a>(
             downloaded_chunks.clone(),
         )
         .await?;
+        pull_stats.add(stats);
     }
 
     if let Err(err) = std::fs::rename(&tmp_manifest_name, &manifest_name) {
@@ -866,7 +932,7 @@ async fn pull_snapshot<'a>(
         .cleanup_unreferenced_files(&manifest)
         .map_err(|err| format_err!("failed to cleanup unreferenced files - {err}"))?;
 
-    Ok(())
+    Ok(pull_stats)
 }
 
 /// Pulls a `snapshot`, removing newly created ones on error, but keeping existing ones in any case.
@@ -878,31 +944,36 @@ async fn pull_snapshot_from<'a>(
     reader: Arc<dyn PullReader + 'a>,
     snapshot: &'a pbs_datastore::BackupDir,
     downloaded_chunks: Arc<Mutex<HashSet<[u8; 32]>>>,
-) -> Result<(), Error> {
+) -> Result<PullStats, Error> {
     let (_path, is_new, _snap_lock) = snapshot
         .datastore()
         .create_locked_backup_dir(snapshot.backup_ns(), snapshot.as_ref())?;
 
-    if is_new {
+    let pull_stats = if is_new {
         task_log!(worker, "sync snapshot {}", snapshot.dir());
 
-        if let Err(err) = pull_snapshot(worker, reader, snapshot, downloaded_chunks).await {
-            if let Err(cleanup_err) = snapshot.datastore().remove_backup_dir(
-                snapshot.backup_ns(),
-                snapshot.as_ref(),
-                true,
-            ) {
-                task_log!(worker, "cleanup error - {}", cleanup_err);
+        match pull_snapshot(worker, reader, snapshot, downloaded_chunks).await {
+            Err(err) => {
+                if let Err(cleanup_err) = snapshot.datastore().remove_backup_dir(
+                    snapshot.backup_ns(),
+                    snapshot.as_ref(),
+                    true,
+                ) {
+                    task_log!(worker, "cleanup error - {}", cleanup_err);
+                }
+                return Err(err);
             }
-            return Err(err);
+            Ok(pull_stats) => {
+                task_log!(worker, "sync snapshot {} done", snapshot.dir());
+                pull_stats
+            }
         }
-        task_log!(worker, "sync snapshot {} done", snapshot.dir());
     } else {
         task_log!(worker, "re-sync snapshot {}", snapshot.dir());
-        pull_snapshot(worker, reader, snapshot, downloaded_chunks).await?;
-    }
+        pull_snapshot(worker, reader, snapshot, downloaded_chunks).await?
+    };
 
-    Ok(())
+    Ok(pull_stats)
 }
 
 #[derive(PartialEq, Eq)]
@@ -1007,7 +1078,7 @@ async fn pull_group(
     source_namespace: &BackupNamespace,
     group: &BackupGroup,
     progress: &mut StoreProgress,
-) -> Result<(), Error> {
+) -> Result<PullStats, Error> {
     let mut already_synced_skip_info = SkipInfo::new(SkipReason::AlreadySynced);
     let mut transfer_last_skip_info = SkipInfo::new(SkipReason::TransferLast);
 
@@ -1064,6 +1135,8 @@ async fn pull_group(
 
     progress.group_snapshots = list.len() as u64;
 
+    let mut pull_stats = PullStats::default();
+
     for (pos, from_snapshot) in list.into_iter().enumerate() {
         let to_snapshot = params
             .target
@@ -1080,7 +1153,8 @@ async fn pull_group(
         progress.done_snapshots = pos as u64 + 1;
         task_log!(worker, "percentage done: {}", progress);
 
-        result?; // stop on error
+        let stats = result?; // stop on error
+        pull_stats.add(stats);
     }
 
     if params.remove_vanished {
@@ -1107,10 +1181,15 @@ async fn pull_group(
                 .target
                 .store
                 .remove_backup_dir(&target_ns, snapshot.as_ref(), false)?;
+            pull_stats.add(PullStats::from(RemovedVanishedStats {
+                snapshots: 1,
+                groups: 0,
+                namespaces: 0,
+            }));
         }
     }
 
-    Ok(())
+    Ok(pull_stats)
 }
 
 fn check_and_create_ns(params: &PullParameters, ns: &BackupNamespace) -> Result<bool, Error> {
@@ -1159,8 +1238,9 @@ fn check_and_remove_vanished_ns(
     worker: &WorkerTask,
     params: &PullParameters,
     synced_ns: HashSet<BackupNamespace>,
-) -> Result<bool, Error> {
+) -> Result<(bool, RemovedVanishedStats), Error> {
     let mut errors = false;
+    let mut removed_stats = RemovedVanishedStats::default();
     let user_info = CachedUserInfo::new()?;
 
     // clamp like remote does so that we don't list more than we can ever have synced.
@@ -1195,7 +1275,10 @@ fn check_and_remove_vanished_ns(
             continue;
         }
         match check_and_remove_ns(params, &local_ns) {
-            Ok(true) => task_log!(worker, "Removed namespace {}", local_ns),
+            Ok(true) => {
+                task_log!(worker, "Removed namespace {local_ns}");
+                removed_stats.namespaces += 1;
+            }
             Ok(false) => task_log!(
                 worker,
                 "Did not remove namespace {} - protected snapshots remain",
@@ -1208,7 +1291,7 @@ fn check_and_remove_vanished_ns(
         }
     }
 
-    Ok(errors)
+    Ok((errors, removed_stats))
 }
 
 /// Pulls a store according to `params`.
@@ -1231,7 +1314,7 @@ fn check_and_remove_vanished_ns(
 pub(crate) async fn pull_store(
     worker: &WorkerTask,
     mut params: PullParameters,
-) -> Result<(), Error> {
+) -> Result<PullStats, Error> {
     // explicit create shared lock to prevent GC on newly created chunks
     let _shared_store_lock = params.target.store.try_shared_chunk_store_lock()?;
     let mut errors = false;
@@ -1267,6 +1350,7 @@ pub(crate) async fn pull_store(
 
     let (mut groups, mut snapshots) = (0, 0);
     let mut synced_ns = HashSet::with_capacity(namespaces.len());
+    let mut pull_stats = PullStats::default();
 
     for namespace in namespaces {
         let source_store_ns_str = print_store_and_ns(params.source.get_store(), &namespace);
@@ -1301,8 +1385,10 @@ pub(crate) async fn pull_store(
         }
 
         match pull_ns(worker, &namespace, &mut params).await {
-            Ok((ns_progress, ns_errors)) => {
+            Ok((ns_progress, ns_pull_stats, ns_errors)) => {
                 errors |= ns_errors;
+
+                pull_stats.add(ns_pull_stats);
 
                 if params.max_depth != Some(0) {
                     groups += ns_progress.done_groups;
@@ -1329,14 +1415,16 @@ pub(crate) async fn pull_store(
     }
 
     if params.remove_vanished {
-        errors |= check_and_remove_vanished_ns(worker, &params, synced_ns)?;
+        let (has_errors, stats) = check_and_remove_vanished_ns(worker, &params, synced_ns)?;
+        errors |= has_errors;
+        pull_stats.add(PullStats::from(stats));
     }
 
     if errors {
         bail!("sync failed with some errors.");
     }
 
-    Ok(())
+    Ok(pull_stats)
 }
 
 /// Pulls a namespace according to `params`.
@@ -1355,10 +1443,9 @@ pub(crate) async fn pull_ns(
     worker: &WorkerTask,
     namespace: &BackupNamespace,
     params: &mut PullParameters,
-) -> Result<(StoreProgress, bool), Error> {
+) -> Result<(StoreProgress, PullStats, bool), Error> {
     let mut list: Vec<BackupGroup> = params.source.list_groups(namespace, &params.owner).await?;
 
-    let total_count = list.len();
     list.sort_unstable_by(|a, b| {
         let type_order = a.ty.cmp(&b.ty);
         if type_order == std::cmp::Ordering::Equal {
@@ -1368,27 +1455,17 @@ pub(crate) async fn pull_ns(
         }
     });
 
-    let apply_filters = |group: &BackupGroup, filters: &[GroupFilter]| -> bool {
-        filters.iter().any(|filter| group.matches(filter))
-    };
-
-    let list = if let Some(ref group_filter) = &params.group_filter {
-        let unfiltered_count = list.len();
-        let list: Vec<BackupGroup> = list
-            .into_iter()
-            .filter(|group| apply_filters(group, group_filter))
-            .collect();
-        task_log!(
-            worker,
-            "found {} groups to sync (out of {} total)",
-            list.len(),
-            unfiltered_count
-        );
-        list
-    } else {
-        task_log!(worker, "found {} groups to sync", total_count);
-        list
-    };
+    let unfiltered_count = list.len();
+    let list: Vec<BackupGroup> = list
+        .into_iter()
+        .filter(|group| group.apply_filters(&params.group_filter))
+        .collect();
+    task_log!(
+        worker,
+        "found {} groups to sync (out of {} total)",
+        list.len(),
+        unfiltered_count
+    );
 
     let mut errors = false;
 
@@ -1398,6 +1475,7 @@ pub(crate) async fn pull_ns(
     }
 
     let mut progress = StoreProgress::new(list.len() as u64);
+    let mut pull_stats = PullStats::default();
 
     let target_ns = namespace.map_prefix(&params.source.get_ns(), &params.target.ns)?;
 
@@ -1438,10 +1516,14 @@ pub(crate) async fn pull_ns(
                 owner
             );
             errors = true; // do not stop here, instead continue
-        } else if let Err(err) = pull_group(worker, params, namespace, &group, &mut progress).await
-        {
-            task_log!(worker, "sync group {} failed - {}", &group, err,);
-            errors = true; // do not stop here, instead continue
+        } else {
+            match pull_group(worker, params, namespace, &group, &mut progress).await {
+                Ok(stats) => pull_stats.add(stats),
+                Err(err) => {
+                    task_log!(worker, "sync group {} failed - {}", &group, err,);
+                    errors = true; // do not stop here, instead continue
+                }
+            }
         }
     }
 
@@ -1457,24 +1539,34 @@ pub(crate) async fn pull_ns(
                 if check_backup_owner(&owner, &params.owner).is_err() {
                     continue;
                 }
-                if let Some(ref group_filter) = &params.group_filter {
-                    if !apply_filters(local_group, group_filter) {
-                        continue;
-                    }
+                if !local_group.apply_filters(&params.group_filter) {
+                    continue;
                 }
                 task_log!(worker, "delete vanished group '{local_group}'",);
-                match params
+                let delete_stats_result = params
                     .target
                     .store
-                    .remove_backup_group(&target_ns, local_group)
-                {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        task_log!(
-                            worker,
-                            "kept some protected snapshots of group '{}'",
-                            local_group
-                        );
+                    .remove_backup_group(&target_ns, local_group);
+
+                match delete_stats_result {
+                    Ok(stats) => {
+                        if !stats.all_removed() {
+                            task_log!(
+                                worker,
+                                "kept some protected snapshots of group '{local_group}'",
+                            );
+                            pull_stats.add(PullStats::from(RemovedVanishedStats {
+                                snapshots: stats.removed_snapshots(),
+                                groups: 0,
+                                namespaces: 0,
+                            }));
+                        } else {
+                            pull_stats.add(PullStats::from(RemovedVanishedStats {
+                                snapshots: stats.removed_snapshots(),
+                                groups: 1,
+                                namespaces: 0,
+                            }));
+                        }
                     }
                     Err(err) => {
                         task_log!(worker, "{}", err);
@@ -1490,5 +1582,5 @@ pub(crate) async fn pull_ns(
         };
     }
 
-    Ok((progress, errors))
+    Ok((progress, pull_stats, errors))
 }

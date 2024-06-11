@@ -198,6 +198,7 @@ async fn run() -> Result<(), Error> {
     }
 
     proxmox_backup::auth_helpers::setup_auth_context(false);
+    proxmox_backup::server::notifications::init()?;
 
     let rrd_cache = initialize_rrd_cache()?;
     rrd_cache.apply_journal()?;
@@ -285,6 +286,16 @@ async fn run() -> Result<(), Error> {
     command_sock.register_command("datastore-removed".to_string(), |_value| {
         if let Err(err) = DataStore::remove_unused_datastores() {
             log::error!("could not refresh datastores: {err}");
+        }
+        Ok(Value::Null)
+    })?;
+
+    // clear cache entry for datastore that is in a specific maintenance mode
+    command_sock.register_command("update-datastore-cache".to_string(), |value| {
+        if let Some(name) = value.and_then(Value::as_str) {
+            if let Err(err) = DataStore::update_datastore_cache(name) {
+                log::error!("could not trigger update datastore cache: {err}");
+            }
         }
         Ok(Value::Null)
     })?;
@@ -871,13 +882,12 @@ async fn run_stat_generator() {
     loop {
         let delay_target = Instant::now() + Duration::from_secs(10);
 
-        let stats = match tokio::task::spawn_blocking(|| {
+        let stats_future = tokio::task::spawn_blocking(|| {
             let hoststats = collect_host_stats_sync();
             let (hostdisk, datastores) = collect_disk_stats_sync();
             Arc::new((hoststats, hostdisk, datastores))
-        })
-        .await
-        {
+        });
+        let stats = match stats_future.await {
             Ok(res) => res,
             Err(err) => {
                 log::error!("collecting host stats panicked: {err}");

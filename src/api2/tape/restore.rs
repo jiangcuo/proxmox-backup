@@ -18,9 +18,10 @@ use proxmox_uuid::Uuid;
 
 use pbs_api_types::{
     parse_ns_and_snapshot, print_ns_and_snapshot, Authid, BackupDir, BackupNamespace, CryptMode,
-    Operation, TapeRestoreNamespace, Userid, DATASTORE_MAP_ARRAY_SCHEMA, DATASTORE_MAP_LIST_SCHEMA,
-    DRIVE_NAME_SCHEMA, MAX_NAMESPACE_DEPTH, PRIV_DATASTORE_BACKUP, PRIV_DATASTORE_MODIFY,
-    PRIV_TAPE_READ, TAPE_RESTORE_NAMESPACE_SCHEMA, TAPE_RESTORE_SNAPSHOT_SCHEMA, UPID_SCHEMA,
+    NotificationMode, Operation, TapeRestoreNamespace, Userid, DATASTORE_MAP_ARRAY_SCHEMA,
+    DATASTORE_MAP_LIST_SCHEMA, DRIVE_NAME_SCHEMA, MAX_NAMESPACE_DEPTH, PRIV_DATASTORE_BACKUP,
+    PRIV_DATASTORE_MODIFY, PRIV_TAPE_READ, TAPE_RESTORE_NAMESPACE_SCHEMA,
+    TAPE_RESTORE_SNAPSHOT_SCHEMA, UPID_SCHEMA,
 };
 use pbs_config::CachedUserInfo;
 use pbs_datastore::dynamic_index::DynamicIndexReader;
@@ -34,8 +35,8 @@ use pbs_tape::{
 use proxmox_rest_server::WorkerTask;
 
 use crate::backup::check_ns_modification_privs;
+use crate::tape::TapeNotificationMode;
 use crate::{
-    server::lookup_user_email,
     tape::{
         drive::{lock_tape_device, request_and_load_media, set_tape_device_state, TapeDriver},
         file_formats::{
@@ -75,7 +76,7 @@ impl TryFrom<Vec<String>> for NamespaceMap {
             let max_depth = mapping.max_depth.unwrap_or(MAX_NAMESPACE_DEPTH);
 
             let ns_map: &mut HashMap<BackupNamespace, (BackupNamespace, usize)> =
-                map.entry(mapping.store).or_insert_with(HashMap::new);
+                map.entry(mapping.store).or_default();
 
             if ns_map.insert(source, (target, max_depth)).is_some() {
                 bail!("duplicate mapping found");
@@ -289,6 +290,10 @@ pub const ROUTER: Router = Router::new().post(&API_METHOD_RESTORE);
                 type: Userid,
                 optional: true,
             },
+            "notification-mode": {
+                type: NotificationMode,
+                optional: true,
+            },
             "snapshots": {
                 description: "List of snapshots.",
                 type: Array,
@@ -322,12 +327,15 @@ pub fn restore(
     namespaces: Option<Vec<String>>,
     media_set: String,
     notify_user: Option<Userid>,
+    notification_mode: Option<NotificationMode>,
     snapshots: Option<Vec<String>>,
     owner: Option<Authid>,
     rpcenv: &mut dyn RpcEnvironment,
 ) -> Result<Value, Error> {
     let auth_id: Authid = rpcenv.get_auth_id().unwrap().parse()?;
     let user_info = CachedUserInfo::new()?;
+
+    let notification_mode = TapeNotificationMode::from((notify_user, notification_mode));
 
     let mut store_map = DataStoreMap::try_from(store)
         .map_err(|err| format_err!("cannot parse store mapping: {err}"))?;
@@ -394,11 +402,6 @@ pub fn restore(
 
             let restore_owner = owner.as_ref().unwrap_or(&auth_id);
 
-            let email = notify_user
-                .as_ref()
-                .and_then(lookup_user_email)
-                .or_else(|| lookup_user_email(&auth_id.clone().into()));
-
             task_log!(worker, "Mediaset '{media_set}'");
             task_log!(worker, "Pool: {pool}");
 
@@ -412,7 +415,7 @@ pub fn restore(
                     &drive,
                     store_map,
                     restore_owner,
-                    email,
+                    &notification_mode,
                     user_info,
                     &auth_id,
                 )
@@ -425,7 +428,7 @@ pub fn restore(
                     &drive,
                     store_map,
                     restore_owner,
-                    email,
+                    &notification_mode,
                     &auth_id,
                 )
             };
@@ -452,7 +455,7 @@ fn restore_full_worker(
     drive_name: &str,
     store_map: DataStoreMap,
     restore_owner: &Authid,
-    email: Option<String>,
+    notification_mode: &TapeNotificationMode,
     auth_id: &Authid,
 ) -> Result<(), Error> {
     let members = inventory.compute_media_set_members(&media_set_uuid)?;
@@ -519,7 +522,7 @@ fn restore_full_worker(
             &store_map,
             &mut checked_chunks_map,
             restore_owner,
-            &email,
+            notification_mode,
             auth_id,
         )?;
     }
@@ -635,7 +638,7 @@ fn restore_list_worker(
     drive_name: &str,
     store_map: DataStoreMap,
     restore_owner: &Authid,
-    email: Option<String>,
+    notification_mode: &TapeNotificationMode,
     user_info: Arc<CachedUserInfo>,
     auth_id: &Authid,
 ) -> Result<(), Error> {
@@ -747,7 +750,7 @@ fn restore_list_worker(
 
             let file_list = snapshot_file_hash
                 .entry(media_id.label.uuid.clone())
-                .or_insert_with(Vec::new);
+                .or_default();
             file_list.push(file_num);
 
             task_log!(
@@ -779,7 +782,7 @@ fn restore_list_worker(
                 &drive_config,
                 drive_name,
                 &media_id.label,
-                &email,
+                notification_mode,
             )?;
             file_list.sort_unstable();
 
@@ -808,10 +811,8 @@ fn restore_list_worker(
                 // we only want to restore chunks that we do not have yet
                 if !datastore.cond_touch_chunk(&digest, false)? {
                     if let Some((uuid, nr)) = catalog.lookup_chunk(&source_datastore, &digest) {
-                        let file = media_file_chunk_map
-                            .entry(uuid.clone())
-                            .or_insert_with(BTreeMap::new);
-                        let chunks = file.entry(nr).or_insert_with(HashSet::new);
+                        let file = media_file_chunk_map.entry(uuid.clone()).or_default();
+                        let chunks = file.entry(nr).or_default();
                         chunks.insert(digest);
                     }
                 }
@@ -835,7 +836,7 @@ fn restore_list_worker(
                 &drive_config,
                 drive_name,
                 &media_id.label,
-                &email,
+                notification_mode,
             )?;
             restore_file_chunk_map(worker.clone(), &mut drive, &store_map, file_chunk_map)?;
         }
@@ -1029,12 +1030,6 @@ fn restore_snapshots_to_tmpdir(
                     media_set_uuid
                 );
             }
-            let encrypt_fingerprint = set.encryption_key_fingerprint.clone().map(|fp| {
-                task_log!(worker, "Encryption key fingerprint: {}", fp);
-                (fp, set.uuid.clone())
-            });
-
-            drive.set_encryption(encrypt_fingerprint)?;
         }
     }
 
@@ -1095,9 +1090,7 @@ fn restore_snapshots_to_tmpdir(
                 );
                 std::fs::create_dir_all(&tmp_path)?;
 
-                let chunks = chunks_list
-                    .entry(source_datastore)
-                    .or_insert_with(HashSet::new);
+                let chunks = chunks_list.entry(source_datastore).or_default();
                 let manifest =
                     try_restore_snapshot_archive(worker.clone(), &mut decoder, &tmp_path)?;
 
@@ -1251,7 +1244,7 @@ pub fn request_and_restore_media(
     store_map: &DataStoreMap,
     checked_chunks_map: &mut HashMap<String, HashSet<[u8; 32]>>,
     restore_owner: &Authid,
-    email: &Option<String>,
+    notification_mode: &TapeNotificationMode,
     auth_id: &Authid,
 ) -> Result<(), Error> {
     let media_set_uuid = match media_id.media_set_label {
@@ -1259,8 +1252,13 @@ pub fn request_and_restore_media(
         Some(ref set) => &set.uuid,
     };
 
-    let (mut drive, info) =
-        request_and_load_media(&worker, drive_config, drive_name, &media_id.label, email)?;
+    let (mut drive, info) = request_and_load_media(
+        &worker,
+        drive_config,
+        drive_name,
+        &media_id.label,
+        notification_mode,
+    )?;
 
     match info.media_set_label {
         None => {
@@ -1279,12 +1277,6 @@ pub fn request_and_restore_media(
                     media_set_uuid
                 );
             }
-            let encrypt_fingerprint = set
-                .encryption_key_fingerprint
-                .clone()
-                .map(|fp| (fp, set.uuid.clone()));
-
-            drive.set_encryption(encrypt_fingerprint)?;
         }
     }
 

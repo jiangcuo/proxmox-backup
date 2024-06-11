@@ -192,6 +192,10 @@ async fn backup_directory<P: AsRef<Path>>(
     pxar_create_options: pbs_client::pxar::PxarCreateOptions,
     upload_options: UploadOptions,
 ) -> Result<BackupStats, Error> {
+    if upload_options.fixed_size.is_some() {
+        bail!("cannot backup directory with fixed chunk size!");
+    }
+
     let pxar_stream = PxarBackupStream::open(dir_path.as_ref(), catalog, pxar_create_options)?;
     let mut chunk_stream = ChunkStream::new(pxar_stream, chunk_size);
 
@@ -205,10 +209,6 @@ async fn backup_directory<P: AsRef<Path>>(
             let _ = tx.send(v).await;
         }
     });
-
-    if upload_options.fixed_size.is_some() {
-        bail!("cannot backup directory with fixed chunk size!");
-    }
 
     let stats = client
         .upload_stream(archive_name, stream, upload_options)
@@ -665,6 +665,12 @@ fn spawn_catalog_upload(
                optional: true,
                default: false,
            },
+           "skip-e2big-xattr": {
+               type: Boolean,
+               description: "Ignore the E2BIG error when retrieving xattrs. This includes the file, but discards the metadata.",
+               optional: true,
+               default: false,
+           },
        }
    }
 )]
@@ -674,6 +680,7 @@ async fn create_backup(
     all_file_systems: bool,
     skip_lost_and_found: bool,
     dry_run: bool,
+    skip_e2big_xattr: bool,
     _info: &ApiMethod,
     _rpcenv: &mut dyn RpcEnvironment,
 ) -> Result<Value, Error> {
@@ -778,7 +785,8 @@ async fn create_backup(
                 upload_list.push((
                     BackupSpecificationType::PXAR,
                     filename.to_owned(),
-                    format!("{}.didx", target),
+                    target.to_owned(),
+                    "didx",
                     0,
                 ));
             }
@@ -796,7 +804,8 @@ async fn create_backup(
                 upload_list.push((
                     BackupSpecificationType::IMAGE,
                     filename.to_owned(),
-                    format!("{}.fidx", target),
+                    target.to_owned(),
+                    "fidx",
                     size,
                 ));
             }
@@ -807,7 +816,8 @@ async fn create_backup(
                 upload_list.push((
                     BackupSpecificationType::CONFIG,
                     filename.to_owned(),
-                    format!("{}.blob", target),
+                    target.to_owned(),
+                    "blob",
                     metadata.len(),
                 ));
             }
@@ -818,7 +828,8 @@ async fn create_backup(
                 upload_list.push((
                     BackupSpecificationType::LOGFILE,
                     filename.to_owned(),
-                    format!("{}.blob", target),
+                    target.to_owned(),
+                    "blob",
                     metadata.len(),
                 ));
             }
@@ -827,7 +838,7 @@ async fn create_backup(
 
     let backup_time = backup_time_opt.unwrap_or_else(epoch_i64);
 
-    let client = connect_rate_limited(&repo, rate_limit)?;
+    let http_client = connect_rate_limited(&repo, rate_limit)?;
     record_repository(&repo);
 
     let snapshot = BackupDir::from((backup_type, backup_id.to_owned(), backup_time));
@@ -879,7 +890,7 @@ async fn create_backup(
     };
 
     let client = BackupWriter::start(
-        client,
+        &http_client,
         crypt_config.clone(),
         repo.store(),
         &backup_ns,
@@ -937,7 +948,8 @@ async fn create_backup(
         log::info!("{} {} '{}' to '{}' as {}", what, desc, file, repo, target);
     };
 
-    for (backup_type, filename, target, size) in upload_list {
+    for (backup_type, filename, target_base, extension, size) in upload_list {
+        let target = format!("{target_base}.{extension}");
         match (backup_type, dry_run) {
             // dry-run
             (BackupSpecificationType::CONFIG, true) => log_file("config file", &filename, &target),
@@ -993,6 +1005,7 @@ async fn create_backup(
                     patterns: pattern_list.clone(),
                     entries_max: entries_max as usize,
                     skip_lost_and_found,
+                    skip_e2big_xattr,
                 };
 
                 let upload_options = UploadOptions {

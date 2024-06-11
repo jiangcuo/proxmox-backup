@@ -27,19 +27,21 @@ use proxmox_sys::fs::{
     file_read_firstline, file_read_optional_string, replace_file, CreateOptions,
 };
 use proxmox_sys::{task_log, task_warn};
+use proxmox_time::CalendarEvent;
 
 use pxar::accessor::aio::Accessor;
 use pxar::EntryKind;
 
 use pbs_api_types::{
     print_ns_and_snapshot, print_store_and_ns, Authid, BackupContent, BackupNamespace, BackupType,
-    Counts, CryptMode, DataStoreListItem, DataStoreStatus, GarbageCollectionStatus, GroupListItem,
-    KeepOptions, Operation, PruneJobOptions, RRDMode, RRDTimeFrame, SnapshotListItem,
-    SnapshotVerifyState, BACKUP_ARCHIVE_NAME_SCHEMA, BACKUP_ID_SCHEMA, BACKUP_NAMESPACE_SCHEMA,
-    BACKUP_TIME_SCHEMA, BACKUP_TYPE_SCHEMA, DATASTORE_SCHEMA, IGNORE_VERIFIED_BACKUPS_SCHEMA,
-    MAX_NAMESPACE_DEPTH, NS_MAX_DEPTH_SCHEMA, PRIV_DATASTORE_AUDIT, PRIV_DATASTORE_BACKUP,
-    PRIV_DATASTORE_MODIFY, PRIV_DATASTORE_PRUNE, PRIV_DATASTORE_READ, PRIV_DATASTORE_VERIFY,
-    UPID_SCHEMA, VERIFICATION_OUTDATED_AFTER_SCHEMA,
+    Counts, CryptMode, DataStoreConfig, DataStoreListItem, DataStoreStatus,
+    GarbageCollectionJobStatus, GroupListItem, JobScheduleStatus, KeepOptions, Operation,
+    PruneJobOptions, RRDMode, RRDTimeFrame, SnapshotListItem, SnapshotVerifyState,
+    BACKUP_ARCHIVE_NAME_SCHEMA, BACKUP_ID_SCHEMA, BACKUP_NAMESPACE_SCHEMA, BACKUP_TIME_SCHEMA,
+    BACKUP_TYPE_SCHEMA, DATASTORE_SCHEMA, IGNORE_VERIFIED_BACKUPS_SCHEMA, MAX_NAMESPACE_DEPTH,
+    NS_MAX_DEPTH_SCHEMA, PRIV_DATASTORE_AUDIT, PRIV_DATASTORE_BACKUP, PRIV_DATASTORE_MODIFY,
+    PRIV_DATASTORE_PRUNE, PRIV_DATASTORE_READ, PRIV_DATASTORE_VERIFY, UPID, UPID_SCHEMA,
+    VERIFICATION_OUTDATED_AFTER_SCHEMA,
 };
 use pbs_client::pxar::{create_tar, create_zip};
 use pbs_config::CachedUserInfo;
@@ -67,7 +69,7 @@ use crate::backup::{
     ListAccessibleBackupGroups, NS_PRIVS_OK,
 };
 
-use crate::server::jobstate::Job;
+use crate::server::jobstate::{compute_schedule_status, Job, JobState};
 
 const GROUP_NOTES_FILE_NAME: &str = "notes";
 
@@ -294,7 +296,8 @@ pub async fn delete_group(
             &group,
         )?;
 
-        if !datastore.remove_backup_group(&ns, &group)? {
+        let delete_stats = datastore.remove_backup_group(&ns, &group)?;
+        if !delete_stats.all_removed() {
             bail!("group only partially deleted due to protected snapshots");
         }
 
@@ -675,8 +678,6 @@ pub async fn status(
     let user_info = CachedUserInfo::new()?;
     let store_privs = user_info.lookup_privs(&auth_id, &["datastore", &store]);
 
-    let datastore = DataStore::lookup_datastore(&store, Some(Operation::Read));
-
     let store_stats = if store_privs & (PRIV_DATASTORE_AUDIT | PRIV_DATASTORE_BACKUP) != 0 {
         true
     } else if store_privs & PRIV_DATASTORE_READ != 0 {
@@ -688,7 +689,8 @@ pub async fn status(
             _ => false,
         }
     };
-    let datastore = datastore?; // only unwrap no to avoid leaking existence info
+
+    let datastore = DataStore::lookup_datastore(&store, Some(Operation::Read))?;
 
     let (counts, gc_status) = if verbose {
         let filter_owner = if store_privs & PRIV_DATASTORE_AUDIT != 0 {
@@ -944,6 +946,12 @@ pub fn verify(
                 type: BackupNamespace,
                 optional: true,
             },
+            "use-task": {
+                type: bool,
+                default: false,
+                optional: true,
+                description: "Spins up an asynchronous task that does the work.",
+            },
         },
     },
     returns: pbs_api_types::ADMIN_DATASTORE_PRUNE_RETURN_TYPE,
@@ -960,7 +968,7 @@ pub fn prune(
     keep_options: KeepOptions,
     store: String,
     ns: Option<BackupNamespace>,
-    _param: Value,
+    param: Value,
     rpcenv: &mut dyn RpcEnvironment,
 ) -> Result<Value, Error> {
     let auth_id: Authid = rpcenv.get_auth_id().unwrap().parse()?;
@@ -978,7 +986,20 @@ pub fn prune(
     let worker_id = format!("{}:{}:{}", store, ns, group);
     let group = datastore.backup_group(ns.clone(), group);
 
-    let mut prune_result = Vec::new();
+    #[derive(Debug, serde::Serialize)]
+    struct PruneResult {
+        #[serde(rename = "backup-type")]
+        backup_type: BackupType,
+        #[serde(rename = "backup-id")]
+        backup_id: String,
+        #[serde(rename = "backup-time")]
+        backup_time: i64,
+        keep: bool,
+        protected: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ns: Option<BackupNamespace>,
+    }
+    let mut prune_result: Vec<PruneResult> = Vec::new();
 
     let list = group.list_backups()?;
 
@@ -991,78 +1012,97 @@ pub fn prune(
     if dry_run {
         for (info, mark) in prune_info {
             let keep = keep_all || mark.keep();
+            let backup_dir = &info.backup_dir;
 
-            let mut result = json!({
-                "backup-type": info.backup_dir.backup_type(),
-                "backup-id": info.backup_dir.backup_id(),
-                "backup-time": info.backup_dir.backup_time(),
-                "keep": keep,
-                "protected": mark.protected(),
-            });
-            let prune_ns = info.backup_dir.backup_ns();
+            let mut result = PruneResult {
+                backup_type: backup_dir.backup_type(),
+                backup_id: backup_dir.backup_id().to_owned(),
+                backup_time: backup_dir.backup_time(),
+                keep,
+                protected: mark.protected(),
+                ns: None,
+            };
+            let prune_ns = backup_dir.backup_ns();
             if !prune_ns.is_root() {
-                result["ns"] = serde_json::to_value(prune_ns)?;
+                result.ns = Some(prune_ns.to_owned());
             }
             prune_result.push(result);
         }
         return Ok(json!(prune_result));
     }
 
-    // We use a WorkerTask just to have a task log, but run synchrounously
-    let worker = WorkerTask::new("prune", Some(worker_id), auth_id.to_string(), true)?;
+    let prune_group = move |worker: Arc<WorkerTask>| {
+        if keep_all {
+            task_log!(worker, "No prune selection - keeping all files.");
+        } else {
+            let mut opts = Vec::new();
+            if !ns.is_root() {
+                opts.push(format!("--ns {ns}"));
+            }
+            crate::server::cli_keep_options(&mut opts, &keep_options);
 
-    if keep_all {
-        task_log!(worker, "No prune selection - keeping all files.");
-    } else {
-        let mut opts = Vec::new();
-        if !ns.is_root() {
-            opts.push(format!("--ns {ns}"));
+            task_log!(worker, "retention options: {}", opts.join(" "));
+            task_log!(
+                worker,
+                "Starting prune on {} group \"{}\"",
+                print_store_and_ns(&store, &ns),
+                group.group(),
+            );
         }
-        crate::server::cli_keep_options(&mut opts, &keep_options);
 
-        task_log!(worker, "retention options: {}", opts.join(" "));
-        task_log!(
-            worker,
-            "Starting prune on {} group \"{}\"",
-            print_store_and_ns(&store, &ns),
-            group.group(),
-        );
-    }
+        for (info, mark) in prune_info {
+            let keep = keep_all || mark.keep();
+            let backup_dir = &info.backup_dir;
 
-    for (info, mark) in prune_info {
-        let keep = keep_all || mark.keep();
+            let backup_time = backup_dir.backup_time();
+            let timestamp = backup_dir.backup_time_string();
+            let group: &pbs_api_types::BackupGroup = backup_dir.as_ref();
 
-        let backup_time = info.backup_dir.backup_time();
-        let timestamp = info.backup_dir.backup_time_string();
-        let group: &pbs_api_types::BackupGroup = info.backup_dir.as_ref();
+            let msg = format!("{}/{}/{timestamp} {mark}", group.ty, group.id);
 
-        let msg = format!("{}/{}/{} {}", group.ty, group.id, timestamp, mark,);
+            task_log!(worker, "{msg}");
 
-        task_log!(worker, "{}", msg);
+            prune_result.push(PruneResult {
+                backup_type: group.ty,
+                backup_id: group.id.clone(),
+                backup_time,
+                keep,
+                protected: mark.protected(),
+                ns: None,
+            });
 
-        prune_result.push(json!({
-            "backup-type": group.ty,
-            "backup-id": group.id,
-            "backup-time": backup_time,
-            "keep": keep,
-            "protected": mark.protected(),
-        }));
-
-        if !(dry_run || keep) {
-            if let Err(err) = info.backup_dir.destroy(false) {
-                task_warn!(
-                    worker,
-                    "failed to remove dir {:?}: {}",
-                    info.backup_dir.relative_path(),
-                    err,
-                );
+            if !keep {
+                if let Err(err) = backup_dir.destroy(false) {
+                    task_warn!(
+                        worker,
+                        "failed to remove dir {:?}: {}",
+                        backup_dir.relative_path(),
+                        err,
+                    );
+                }
             }
         }
+        prune_result
+    };
+
+    if param["use-task"].as_bool().unwrap_or(false) {
+        let upid = WorkerTask::spawn(
+            "prune",
+            Some(worker_id),
+            auth_id.to_string(),
+            true,
+            move |worker| async move {
+                let _ = prune_group(worker.clone());
+                Ok(())
+            },
+        )?;
+        Ok(json!(upid))
+    } else {
+        let worker = WorkerTask::new("prune", Some(worker_id), auth_id.to_string(), true)?;
+        let result = prune_group(worker.clone());
+        worker.log_result(&Ok(()));
+        Ok(json!(result))
     }
-
-    worker.log_result(&Ok(()));
-
-    Ok(json!(prune_result))
 }
 
 #[api(
@@ -1180,7 +1220,7 @@ pub fn start_garbage_collection(
         },
     },
     returns: {
-        type: GarbageCollectionStatus,
+        type: GarbageCollectionJobStatus,
     },
     access: {
         permission: &Permission::Privilege(&["datastore", "{store}"], PRIV_DATASTORE_AUDIT, false),
@@ -1191,12 +1231,62 @@ pub fn garbage_collection_status(
     store: String,
     _info: &ApiMethod,
     _rpcenv: &mut dyn RpcEnvironment,
-) -> Result<GarbageCollectionStatus, Error> {
+) -> Result<GarbageCollectionJobStatus, Error> {
+    let (config, _) = pbs_config::datastore::config()?;
+    let store_config: DataStoreConfig = config.lookup("datastore", &store)?;
+
+    let mut info = GarbageCollectionJobStatus {
+        store: store.clone(),
+        schedule: store_config.gc_schedule,
+        ..Default::default()
+    };
+
     let datastore = DataStore::lookup_datastore(&store, Some(Operation::Read))?;
+    let status_in_memory = datastore.last_gc_status();
+    let state_file = JobState::load("garbage_collection", &store)
+        .map_err(|err| log::error!("could not open GC statefile for {store}: {err}"))
+        .ok();
 
-    let status = datastore.last_gc_status();
+    let mut last = proxmox_time::epoch_i64();
 
-    Ok(status)
+    if let Some(ref upid) = status_in_memory.upid {
+        let mut computed_schedule: JobScheduleStatus = JobScheduleStatus::default();
+        if let Some(state) = state_file {
+            if let Ok(cs) = compute_schedule_status(&state, Some(upid)) {
+                computed_schedule = cs;
+            }
+        }
+
+        if let Some(endtime) = computed_schedule.last_run_endtime {
+            last = endtime;
+            if let Ok(parsed_upid) = upid.parse::<UPID>() {
+                info.duration = Some(endtime - parsed_upid.starttime);
+            }
+        }
+
+        info.next_run = computed_schedule.next_run;
+        info.last_run_endtime = computed_schedule.last_run_endtime;
+        info.last_run_state = computed_schedule.last_run_state;
+    }
+
+    info.next_run = info
+        .schedule
+        .as_ref()
+        .and_then(|s| {
+            s.parse::<CalendarEvent>()
+                .map_err(|err| log::error!("{err}"))
+                .ok()
+        })
+        .and_then(|e| {
+            e.compute_next_event(last)
+                .map_err(|err| log::error!("{err}"))
+                .ok()
+        })
+        .and_then(|ne| ne);
+
+    info.status = status_in_memory;
+
+    Ok(info)
 }
 
 #[api(
@@ -1653,6 +1743,29 @@ pub const API_METHOD_PXAR_FILE_DOWNLOAD: ApiMethod = ApiMethod::new(
     &Permission::Anybody,
 );
 
+fn get_local_pxar_reader(
+    datastore: Arc<DataStore>,
+    manifest: &BackupManifest,
+    backup_dir: &BackupDir,
+    pxar_name: &str,
+) -> Result<(LocalDynamicReadAt<LocalChunkReader>, u64), Error> {
+    let mut path = datastore.base_path();
+    path.push(backup_dir.relative_path());
+    path.push(pxar_name);
+
+    let index = DynamicIndexReader::open(&path)
+        .map_err(|err| format_err!("unable to read dynamic index '{:?}' - {}", &path, err))?;
+
+    let (csum, size) = index.compute_csum();
+    manifest.verify_file(pxar_name, &csum, size)?;
+
+    let chunk_reader = LocalChunkReader::new(datastore, None, CryptMode::None);
+    let reader = BufferedDynamicReader::new(index, chunk_reader);
+    let archive_size = reader.archive_size();
+
+    Ok((LocalDynamicReadAt::new(reader), archive_size))
+}
+
 pub fn pxar_file_download(
     _parts: Parts,
     _req_body: Body,
@@ -1697,20 +1810,8 @@ pub fn pxar_file_download(
             }
         }
 
-        let mut path = datastore.base_path();
-        path.push(backup_dir.relative_path());
-        path.push(pxar_name);
-
-        let index = DynamicIndexReader::open(&path)
-            .map_err(|err| format_err!("unable to read dynamic index '{:?}' - {}", &path, err))?;
-
-        let (csum, size) = index.compute_csum();
-        manifest.verify_file(pxar_name, &csum, size)?;
-
-        let chunk_reader = LocalChunkReader::new(datastore, None, CryptMode::None);
-        let reader = BufferedDynamicReader::new(index, chunk_reader);
-        let archive_size = reader.archive_size();
-        let reader = LocalDynamicReadAt::new(reader);
+        let (reader, archive_size) =
+            get_local_pxar_reader(datastore.clone(), &manifest, &backup_dir, pxar_name)?;
 
         let decoder = Accessor::new(reader, archive_size).await?;
         let root = decoder.open_root().await?;

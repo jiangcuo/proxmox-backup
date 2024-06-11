@@ -16,6 +16,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 use anyhow::{bail, format_err, Error};
 
+use pbs_tape::sg_tape::drive_get_encryption;
 use proxmox_uuid::Uuid;
 
 use pbs_api_types::{
@@ -23,7 +24,6 @@ use pbs_api_types::{
 };
 use pbs_key_config::KeyConfig;
 use pbs_tape::{
-    linux_list_drives::open_lto_tape_device,
     sg_tape::{SgTape, TapeAlertFlags},
     BlockReadError, MediaContentHeader, TapeRead, TapeWrite,
 };
@@ -34,75 +34,47 @@ use crate::tape::{
     file_formats::{MediaSetLabel, PROXMOX_BACKUP_MEDIA_SET_LABEL_MAGIC_1_0},
 };
 
-/// Open a tape device
-///
-/// This does additional checks:
-///
-/// - check if it is a non-rewinding tape device
-/// - check if drive is ready (tape loaded)
-/// - check block size
-/// - for autoloader only, try to reload ejected tapes
-pub fn open_lto_tape_drive(config: &LtoTapeDrive) -> Result<LtoTapeHandle, Error> {
-    proxmox_lang::try_block!({
-        let file = open_lto_tape_device(&config.path)?;
-
-        let mut handle = LtoTapeHandle::new(file)?;
-
-        if handle.sg_tape.test_unit_ready().is_err() {
-            // for autoloader only, try to reload ejected tapes
-            if config.changer.is_some() {
-                let _ = handle.sg_tape.load(); // just try, ignore error
+impl Drop for LtoTapeHandle {
+    fn drop(&mut self) {
+        // always unload the encryption key when the handle is dropped for security
+        // but only log an error if we set one in the first place
+        if let Err(err) = self.set_encryption(None) {
+            if self.encryption_key_loaded {
+                log::error!("could not unload encryption key from drive: {err}");
             }
         }
-
-        handle.sg_tape.wait_until_ready(None)?;
-
-        handle.set_default_options()?;
-
-        Ok(handle)
-    })
-    .map_err(|err: Error| {
-        format_err!(
-            "open drive '{}' ({}) failed - {}",
-            config.name,
-            config.path,
-            err
-        )
-    })
+    }
 }
 
 /// Lto Tape device handle
 pub struct LtoTapeHandle {
     sg_tape: SgTape,
+    encryption_key_loaded: bool,
 }
 
 impl LtoTapeHandle {
     /// Creates a new instance
     pub fn new(file: File) -> Result<Self, Error> {
         let sg_tape = SgTape::new(file)?;
-        Ok(Self { sg_tape })
+        Ok(Self {
+            sg_tape,
+            encryption_key_loaded: false,
+        })
     }
 
-    /// Set all options we need/want
-    pub fn set_default_options(&mut self) -> Result<(), Error> {
-        self.sg_tape.set_default_options()?;
-        Ok(())
-    }
+    /// Open a tape device
+    ///
+    /// since this calls [SgTape::open_lto_drive], it does some internal checks.
+    /// See [SgTape] docs for details.
+    pub fn open_lto_drive(config: &LtoTapeDrive) -> Result<Self, Error> {
+        let sg_tape = SgTape::open_lto_drive(config)?;
 
-    /// Set driver options
-    pub fn set_drive_options(
-        &mut self,
-        compression: Option<bool>,
-        block_length: Option<u32>,
-        buffer_mode: Option<bool>,
-    ) -> Result<(), Error> {
-        self.sg_tape
-            .set_drive_options(compression, block_length, buffer_mode)
-    }
+        let handle = Self {
+            sg_tape,
+            encryption_key_loaded: false,
+        };
 
-    /// Write a single EOF mark without flushing buffers
-    pub fn write_filemarks(&mut self, count: usize) -> Result<(), std::io::Error> {
-        self.sg_tape.write_filemarks(count, false)
+        Ok(handle)
     }
 
     /// Get Tape and Media status
@@ -118,25 +90,9 @@ impl LtoTapeHandle {
         self.sg_tape.space_filemarks(-count.try_into()?)
     }
 
-    pub fn forward_space_count_records(&mut self, count: usize) -> Result<(), Error> {
-        self.sg_tape.space_blocks(count.try_into()?)
-    }
-
-    pub fn backward_space_count_records(&mut self, count: usize) -> Result<(), Error> {
-        self.sg_tape.space_blocks(-count.try_into()?)
-    }
-
     /// Position the tape after filemark count. Count 0 means BOT.
     pub fn locate_file(&mut self, position: u64) -> Result<(), Error> {
         self.sg_tape.locate_file(position)
-    }
-
-    pub fn erase_media(&mut self, fast: bool) -> Result<(), Error> {
-        self.sg_tape.erase_media(fast)
-    }
-
-    pub fn load(&mut self) -> Result<(), Error> {
-        self.sg_tape.load()
     }
 
     /// Read Cartridge Memory (MAM Attributes)
@@ -147,20 +103,6 @@ impl LtoTapeHandle {
     /// Read Volume Statistics
     pub fn volume_statistics(&mut self) -> Result<Lp17VolumeStatistics, Error> {
         self.sg_tape.volume_statistics()
-    }
-
-    /// Lock the drive door
-    pub fn lock(&mut self) -> Result<(), Error> {
-        self.sg_tape
-            .set_medium_removal(false)
-            .map_err(|err| format_err!("lock door failed - {}", err))
-    }
-
-    /// Unlock the drive door
-    pub fn unlock(&mut self) -> Result<(), Error> {
-        self.sg_tape
-            .set_medium_removal(true)
-            .map_err(|err| format_err!("unlock door failed - {}", err))
     }
 
     /// Returns if a medium is present
@@ -276,6 +218,15 @@ impl TapeDriver for LtoTapeHandle {
 
         self.sync()?; // sync data to tape
 
+        let encrypt_fingerprint = media_set_label
+            .encryption_key_fingerprint
+            .clone()
+            .map(|fp| (fp, media_set_label.uuid.clone()));
+
+        self.set_encryption(encrypt_fingerprint)?;
+
+        self.write_additional_attributes(None, Some(media_set_label.pool.clone()));
+
         Ok(())
     }
 
@@ -297,46 +248,35 @@ impl TapeDriver for LtoTapeHandle {
         &mut self,
         key_fingerprint: Option<(Fingerprint, Uuid)>,
     ) -> Result<(), Error> {
-        if nix::unistd::Uid::effective().is_root() {
-            if let Some((ref key_fingerprint, ref uuid)) = key_fingerprint {
-                let (key_map, _digest) = crate::tape::encryption_keys::load_keys()?;
-                match key_map.get(key_fingerprint) {
-                    Some(item) => {
-                        // derive specialized key for each media-set
-
-                        let mut tape_key = [0u8; 32];
-
-                        let uuid_bytes: [u8; 16] = *uuid.as_bytes();
-
-                        openssl::pkcs5::pbkdf2_hmac(
-                            &item.key,
-                            &uuid_bytes,
-                            10,
-                            openssl::hash::MessageDigest::sha256(),
-                            &mut tape_key,
-                        )?;
-
-                        return self.sg_tape.set_encryption(Some(tape_key));
-                    }
-                    None => bail!("unknown tape encryption key '{}'", key_fingerprint),
-                }
-            } else {
-                return self.sg_tape.set_encryption(None);
-            }
-        }
-
-        let output = if let Some((fingerprint, uuid)) = key_fingerprint {
+        if let Some((fingerprint, uuid)) = key_fingerprint {
             let fingerprint = fingerprint.signature();
-            run_sg_tape_cmd(
+            let output = run_sg_tape_cmd(
                 "encryption",
                 &["--fingerprint", &fingerprint, "--uuid", &uuid.to_string()],
                 self.sg_tape.file_mut().as_raw_fd(),
-            )?
+            )?;
+            self.encryption_key_loaded = true;
+            let result: Result<(), String> = serde_json::from_str(&output)?;
+            result.map_err(|err| format_err!("{}", err))
         } else {
-            run_sg_tape_cmd("encryption", &[], self.sg_tape.file_mut().as_raw_fd())?
-        };
-        let result: Result<(), String> = serde_json::from_str(&output)?;
-        result.map_err(|err| format_err!("{}", err))
+            self.sg_tape.set_encryption(None)
+        }
+    }
+
+    fn assert_encryption_mode(&mut self, encryption_wanted: bool) -> Result<(), Error> {
+        let encryption_set = drive_get_encryption(self.sg_tape.file_mut())?;
+        if encryption_wanted != encryption_set {
+            bail!("Set encryption mode not what was desired (set: {encryption_set}, wanted: {encryption_wanted})");
+        }
+        Ok(())
+    }
+
+    fn get_volume_statistics(&mut self) -> Result<pbs_api_types::Lp17VolumeStatistics, Error> {
+        self.volume_statistics()
+    }
+
+    fn write_additional_attributes(&mut self, label: Option<String>, pool: Option<String>) {
+        self.sg_tape.write_mam_attributes(label, pool)
     }
 }
 

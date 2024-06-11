@@ -1,24 +1,25 @@
-use anyhow::format_err;
 use std::str::FromStr;
 
+use anyhow::bail;
+use const_format::concatcp;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use proxmox_schema::*;
 
 use crate::{
-    Authid, BackupNamespace, BackupType, RateLimitConfig, Userid, BACKUP_GROUP_SCHEMA,
-    BACKUP_NAMESPACE_SCHEMA, DATASTORE_SCHEMA, DRIVE_NAME_SCHEMA, MEDIA_POOL_NAME_SCHEMA,
-    NS_MAX_DEPTH_REDUCED_SCHEMA, PROXMOX_SAFE_ID_FORMAT, REMOTE_ID_SCHEMA,
-    SINGLE_LINE_COMMENT_SCHEMA,
+    Authid, BackupNamespace, BackupType, NotificationMode, RateLimitConfig, Userid,
+    BACKUP_GROUP_SCHEMA, BACKUP_NAMESPACE_SCHEMA, BACKUP_NS_RE, DATASTORE_SCHEMA,
+    DRIVE_NAME_SCHEMA, MEDIA_POOL_NAME_SCHEMA, NS_MAX_DEPTH_REDUCED_SCHEMA, PROXMOX_SAFE_ID_FORMAT,
+    PROXMOX_SAFE_ID_REGEX_STR, REMOTE_ID_SCHEMA, SINGLE_LINE_COMMENT_SCHEMA,
 };
 
 const_regex! {
 
     /// Regex for verification jobs 'DATASTORE:ACTUAL_JOB_ID'
-    pub VERIFICATION_JOB_WORKER_ID_REGEX = concat!(r"^(", PROXMOX_SAFE_ID_REGEX_STR!(), r"):");
+    pub VERIFICATION_JOB_WORKER_ID_REGEX = concatcp!(r"^(", PROXMOX_SAFE_ID_REGEX_STR, r"):");
     /// Regex for sync jobs '(REMOTE|\-):REMOTE_DATASTORE:LOCAL_DATASTORE:(?:LOCAL_NS_ANCHOR:)ACTUAL_JOB_ID'
-    pub SYNC_JOB_WORKER_ID_REGEX = concat!(r"^(", PROXMOX_SAFE_ID_REGEX_STR!(), r"|\-):(", PROXMOX_SAFE_ID_REGEX_STR!(), r"):(", PROXMOX_SAFE_ID_REGEX_STR!(), r")(?::(", BACKUP_NS_RE!(), r"))?:");
+    pub SYNC_JOB_WORKER_ID_REGEX = concatcp!(r"^(", PROXMOX_SAFE_ID_REGEX_STR, r"|\-):(", PROXMOX_SAFE_ID_REGEX_STR, r"):(", PROXMOX_SAFE_ID_REGEX_STR, r")(?::(", BACKUP_NS_RE, r"))?:");
 }
 
 pub const JOB_ID_SCHEMA: Schema = StringSchema::new("Job ID.")
@@ -324,6 +325,8 @@ pub struct TapeBackupJobSetup {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notify_user: Option<Userid>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub notification_mode: Option<NotificationMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub group_filter: Option<Vec<GroupFilter>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub ns: Option<BackupNamespace>,
@@ -388,7 +391,7 @@ pub struct TapeBackupJobStatus {
 
 #[derive(Clone, Debug)]
 /// Filter for matching `BackupGroup`s, for use with `BackupGroup::filter`.
-pub enum GroupFilter {
+pub enum FilterType {
     /// BackupGroup type - either `vm`, `ct`, or `host`.
     BackupType(BackupType),
     /// Full identifier of BackupGroup, including type
@@ -397,7 +400,7 @@ pub enum GroupFilter {
     Regex(Regex),
 }
 
-impl PartialEq for GroupFilter {
+impl PartialEq for FilterType {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::BackupType(a), Self::BackupType(b)) => a == b,
@@ -408,28 +411,69 @@ impl PartialEq for GroupFilter {
     }
 }
 
+impl std::str::FromStr for FilterType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.split_once(':') {
+            Some(("group", value)) => BACKUP_GROUP_SCHEMA.parse_simple_value(value).map(|_| FilterType::Group(value.to_string()))?,
+            Some(("type", value)) => FilterType::BackupType(value.parse()?),
+            Some(("regex", value)) => FilterType::Regex(Regex::new(value)?),
+            Some((ty, _value)) => bail!("expected 'group', 'type' or 'regex' prefix, got '{}'", ty),
+            None => bail!("input doesn't match expected format '<group:GROUP||type:<vm|ct|host>|regex:REGEX>'"),
+        })
+    }
+}
+
+// used for serializing below, caution!
+impl std::fmt::Display for FilterType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FilterType::BackupType(backup_type) => write!(f, "type:{}", backup_type),
+            FilterType::Group(backup_group) => write!(f, "group:{}", backup_group),
+            FilterType::Regex(regex) => write!(f, "regex:{}", regex.as_str()),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GroupFilter {
+    pub is_exclude: bool,
+    pub filter_type: FilterType,
+}
+
+impl PartialEq for GroupFilter {
+    fn eq(&self, other: &Self) -> bool {
+        self.filter_type == other.filter_type && self.is_exclude == other.is_exclude
+    }
+}
+
+impl Eq for GroupFilter {}
+
 impl std::str::FromStr for GroupFilter {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.split_once(':') {
-            Some(("group", value)) => BACKUP_GROUP_SCHEMA.parse_simple_value(value).map(|_| GroupFilter::Group(value.to_string())),
-            Some(("type", value)) => Ok(GroupFilter::BackupType(value.parse()?)),
-            Some(("regex", value)) => Ok(GroupFilter::Regex(Regex::new(value)?)),
-            Some((ty, _value)) => Err(format_err!("expected 'group', 'type' or 'regex' prefix, got '{}'", ty)),
-            None => Err(format_err!("input doesn't match expected format '<group:GROUP||type:<vm|ct|host>|regex:REGEX>'")),
-        }.map_err(|err| format_err!("'{}' - {}", s, err))
+        let (is_exclude, type_str) = match s.split_once(':') {
+            Some(("include", value)) => (false, value),
+            Some(("exclude", value)) => (true, value),
+            _ => (false, s),
+        };
+
+        Ok(GroupFilter {
+            is_exclude,
+            filter_type: type_str.parse()?,
+        })
     }
 }
 
 // used for serializing below, caution!
 impl std::fmt::Display for GroupFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GroupFilter::BackupType(backup_type) => write!(f, "type:{}", backup_type),
-            GroupFilter::Group(backup_group) => write!(f, "group:{}", backup_group),
-            GroupFilter::Regex(regex) => write!(f, "regex:{}", regex.as_str()),
+        if self.is_exclude {
+            f.write_str("exclude:")?;
         }
+        std::fmt::Display::fmt(&self.filter_type, f)
     }
 }
 
@@ -441,9 +485,9 @@ fn verify_group_filter(input: &str) -> Result<(), anyhow::Error> {
 }
 
 pub const GROUP_FILTER_SCHEMA: Schema = StringSchema::new(
-    "Group filter based on group identifier ('group:GROUP'), group type ('type:<vm|ct|host>'), or regex ('regex:RE').")
+    "Group filter based on group identifier ('group:GROUP'), group type ('type:<vm|ct|host>'), or regex ('regex:RE'). Can be inverted by prepending 'exclude:'.")
     .format(&ApiStringFormat::VerifyFn(verify_group_filter))
-    .type_text("<type:<vm|ct|host>|group:GROUP|regex:RE>")
+    .type_text("[<exclude:|include:>]<type:<vm|ct|host>|group:GROUP|regex:RE>")
     .schema();
 
 pub const GROUP_FILTER_LIST_SCHEMA: Schema =

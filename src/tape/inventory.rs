@@ -33,7 +33,7 @@ use serde_json::json;
 use proxmox_sys::fs::{file_get_json, replace_file, CreateOptions};
 use proxmox_uuid::Uuid;
 
-use pbs_api_types::{MediaLocation, MediaSetPolicy, MediaStatus, RetentionPolicy};
+use pbs_api_types::{Fingerprint, MediaLocation, MediaSetPolicy, MediaStatus, RetentionPolicy};
 use pbs_config::BackupLockGuard;
 
 #[cfg(not(test))]
@@ -71,6 +71,10 @@ impl MediaId {
         }
         self.label.pool.to_owned()
     }
+    pub(crate) fn get_encryption_fp(&self) -> Option<(Fingerprint, Uuid)> {
+        let label = self.clone().media_set_label?;
+        label.encryption_key_fingerprint.map(|fp| (fp, label.uuid))
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -80,6 +84,8 @@ struct MediaStateEntry {
     location: Option<MediaLocation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<MediaStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes_used: Option<u64>,
 }
 
 /// Media Inventory
@@ -207,6 +213,7 @@ impl Inventory {
                 } else {
                     previous.status
                 },
+                bytes_used: previous.bytes_used,
             };
             self.map.insert(uuid, entry);
         } else {
@@ -214,6 +221,7 @@ impl Inventory {
                 id: media_id,
                 location: None,
                 status: None,
+                bytes_used: None,
             };
             self.map.insert(uuid, entry);
         }
@@ -244,14 +252,24 @@ impl Inventory {
     }
 
     /// find media by label_text
-    pub fn find_media_by_label_text(&self, label_text: &str) -> Option<&MediaId> {
-        self.map.values().find_map(|entry| {
-            if entry.id.label.label_text == label_text {
-                Some(&entry.id)
-            } else {
-                None
-            }
-        })
+    pub fn find_media_by_label_text(&self, label_text: &str) -> Result<Option<&MediaId>, Error> {
+        let ids: Vec<_> = self
+            .map
+            .values()
+            .filter_map(|entry| {
+                if entry.id.label.label_text == label_text {
+                    Some(&entry.id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        match ids.len() {
+            0 => Ok(None),
+            1 => Ok(Some(ids[0])),
+            count => bail!("There are '{count}' tapes with the label '{label_text}'"),
+        }
     }
 
     /// Lookup media pool
@@ -704,6 +722,32 @@ impl Inventory {
     /// Lock database, reload database, set location to offline, store database
     pub fn set_media_location_offline(&mut self, uuid: &Uuid) -> Result<(), Error> {
         self.set_media_location(uuid, Some(MediaLocation::Offline))
+    }
+
+    /// Lock database, reload database, set bytes used for media, store database
+    pub fn set_media_bytes_used(
+        &mut self,
+        uuid: &Uuid,
+        bytes_used: Option<u64>,
+    ) -> Result<(), Error> {
+        let _lock = self.lock()?;
+        self.map = self.load_media_db()?;
+        if let Some(entry) = self.map.get_mut(uuid) {
+            entry.bytes_used = bytes_used;
+            self.update_helpers();
+            self.replace_file()?;
+            Ok(())
+        } else {
+            bail!("no such media '{}'", uuid);
+        }
+    }
+
+    /// Returns bytes used of the given media, if set
+    pub fn get_media_bytes_used(&self, uuid: &Uuid) -> Option<u64> {
+        match self.map.get(uuid) {
+            Some(entry) => entry.bytes_used,
+            None => None,
+        }
     }
 
     /// Update online status

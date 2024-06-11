@@ -64,71 +64,39 @@ const ACME_SUBDIRS: SubdirMap = &[(
 #[serde(rename_all = "kebab-case")]
 pub struct CertificateInfo {
     /// Certificate file name.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    filename: Option<String>,
+    pub filename: String,
 
     /// Certificate subject name.
-    subject: String,
+    pub subject: String,
 
     /// List of certificate's SubjectAlternativeName entries.
-    san: Vec<String>,
+    pub san: Vec<String>,
 
     /// Certificate issuer name.
-    issuer: String,
+    pub issuer: String,
 
     /// Certificate's notBefore timestamp (UNIX epoch).
     #[serde(skip_serializing_if = "Option::is_none")]
-    notbefore: Option<i64>,
+    pub notbefore: Option<i64>,
 
     /// Certificate's notAfter timestamp (UNIX epoch).
     #[serde(skip_serializing_if = "Option::is_none")]
-    notafter: Option<i64>,
+    pub notafter: Option<i64>,
 
     /// Certificate in PEM format.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pem: Option<String>,
+    pub pem: Option<String>,
 
     /// Certificate's public key algorithm.
-    public_key_type: String,
+    pub public_key_type: String,
 
     /// Certificate's public key size if available.
     #[serde(skip_serializing_if = "Option::is_none")]
-    public_key_bits: Option<u32>,
+    pub public_key_bits: Option<u32>,
 
     /// The SSL Fingerprint.
-    fingerprint: Option<String>,
-}
-
-impl TryFrom<&cert::CertInfo> for CertificateInfo {
-    type Error = Error;
-
-    fn try_from(info: &cert::CertInfo) -> Result<Self, Self::Error> {
-        let pubkey = info.public_key()?;
-
-        Ok(Self {
-            filename: None,
-            subject: info.subject_name()?,
-            san: info
-                .subject_alt_names()
-                .map(|san| {
-                    san.into_iter()
-                        // FIXME: Support `.ipaddress()`?
-                        .filter_map(|name| name.dnsname().map(str::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            issuer: info.issuer_name()?,
-            notbefore: info.not_before_unix().ok(),
-            notafter: info.not_after_unix().ok(),
-            pem: None,
-            public_key_type: openssl::nid::Nid::from_raw(pubkey.id().as_raw())
-                .long_name()
-                .unwrap_or("<unsupported key type>")
-                .to_owned(),
-            public_key_bits: Some(pubkey.bits()),
-            fingerprint: Some(info.fingerprint()?),
-        })
-    }
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
 
 fn get_certificate_pem() -> Result<String, Error> {
@@ -162,12 +130,31 @@ fn pem_to_cert_info(pem: &[u8]) -> Result<cert::CertInfo, Error> {
 /// Get certificate info.
 pub fn get_info() -> Result<Vec<CertificateInfo>, Error> {
     let cert_pem = get_certificate_pem()?;
-    let cert = pem_to_cert_info(cert_pem.as_bytes())?;
+    let info = pem_to_cert_info(cert_pem.as_bytes())?;
+    let pubkey = info.public_key()?;
 
     Ok(vec![CertificateInfo {
-        filename: Some("proxy.pem".to_string()), // we only have the one
+        filename: "proxy.pem".to_string(), // we only have the one
         pem: Some(cert_pem),
-        ..CertificateInfo::try_from(&cert)?
+        subject: info.subject_name()?,
+        san: info
+            .subject_alt_names()
+            .map(|san| {
+                san.into_iter()
+                    // FIXME: Support `.ipaddress()`?
+                    .filter_map(|name| name.dnsname().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        issuer: info.issuer_name()?,
+        notbefore: info.not_before_unix().ok(),
+        notafter: info.not_after_unix().ok(),
+        public_key_type: openssl::nid::Nid::from_raw(pubkey.id().as_raw())
+            .long_name()
+            .unwrap_or("<unsupported key type>")
+            .to_owned(),
+        public_key_bits: Some(pubkey.bits()),
+        fingerprint: Some(info.fingerprint()?),
     }])
 }
 
@@ -176,7 +163,10 @@ pub fn get_info() -> Result<Vec<CertificateInfo>, Error> {
         properties: {
             node: { schema: NODE_SCHEMA },
             certificates: { description: "PEM encoded certificate (chain)." },
-            key: { description: "PEM encoded private key." },
+            key: {
+                description: "PEM encoded private key.",
+                optional: true,
+            },
             // FIXME: widget-toolkit should have an option to disable using these 2 parameters...
             restart: {
                 description: "UI compatibility parameter, ignored",
@@ -205,10 +195,16 @@ pub fn get_info() -> Result<Vec<CertificateInfo>, Error> {
 /// Upload a custom certificate.
 pub async fn upload_custom_certificate(
     certificates: String,
-    key: String,
+    key: Option<String>,
 ) -> Result<Vec<CertificateInfo>, Error> {
     let certificates = X509::stack_from_pem(certificates.as_bytes())
         .map_err(|err| format_err!("failed to decode certificate chain: {}", err))?;
+
+    let key = match key {
+        Some(key) => key,
+        None => proxmox_sys::fs::file_read_string(configdir!("/proxy.key"))?,
+    };
+
     let key = PKey::private_key_from_pem(key.as_bytes())
         .map_err(|err| format_err!("failed to parse private key: {}", err))?;
 

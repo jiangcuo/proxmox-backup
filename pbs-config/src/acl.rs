@@ -100,7 +100,8 @@ pub fn check_acl_path(path: &str) -> Result<(), Error> {
                 return Ok(());
             }
             match components[1] {
-                "certificates" | "disks" | "log" | "status" | "tasks" | "time" => {
+                "certificates" | "disks" | "log" | "notifications" | "status" | "tasks"
+                | "time" => {
                     if components_len == 2 {
                         return Ok(());
                     }
@@ -198,7 +199,7 @@ impl AclTreeNode {
     }
 
     /// Returns applicable [Role] and their propagation status for a given
-    /// [Authid](pbs_api_types::Authid).
+    /// [Authid].
     ///
     /// If the `Authid` is a [User](pbs_api_types::User) that has no specific `Roles` configured on
     /// this node, applicable `Group` roles will be returned instead.
@@ -447,8 +448,8 @@ impl AclTree {
     }
 
     fn write_node_config(node: &AclTreeNode, path: &str, w: &mut dyn Write) -> Result<(), Error> {
-        let mut role_ug_map0 = HashMap::new();
-        let mut role_ug_map1 = HashMap::new();
+        let mut role_ug_map0: HashMap<_, BTreeSet<_>> = HashMap::new();
+        let mut role_ug_map1: HashMap<_, BTreeSet<_>> = HashMap::new();
 
         for (auth_id, roles) in &node.users {
             // no need to save, because root is always 'Administrator'
@@ -459,15 +460,9 @@ impl AclTree {
                 let role = role.as_str();
                 let auth_id = auth_id.to_string();
                 if *propagate {
-                    role_ug_map1
-                        .entry(role)
-                        .or_insert_with(BTreeSet::new)
-                        .insert(auth_id);
+                    role_ug_map1.entry(role).or_default().insert(auth_id);
                 } else {
-                    role_ug_map0
-                        .entry(role)
-                        .or_insert_with(BTreeSet::new)
-                        .insert(auth_id);
+                    role_ug_map0.entry(role).or_default().insert(auth_id);
                 }
             }
         }
@@ -476,15 +471,9 @@ impl AclTree {
             for (role, propagate) in roles {
                 let group = format!("@{}", group);
                 if *propagate {
-                    role_ug_map1
-                        .entry(role)
-                        .or_insert_with(BTreeSet::new)
-                        .insert(group);
+                    role_ug_map1.entry(role).or_default().insert(group);
                 } else {
-                    role_ug_map0
-                        .entry(role)
-                        .or_insert_with(BTreeSet::new)
-                        .insert(group);
+                    role_ug_map0.entry(role).or_default().insert(group);
                 }
             }
         }
@@ -492,7 +481,7 @@ impl AclTree {
         fn group_by_property_list(
             item_property_map: &HashMap<&str, BTreeSet<String>>,
         ) -> BTreeMap<String, BTreeSet<String>> {
-            let mut result_map = BTreeMap::new();
+            let mut result_map: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
             for (item, property_map) in item_property_map {
                 let item_list = property_map.iter().fold(String::new(), |mut acc, v| {
                     if !acc.is_empty() {
@@ -503,7 +492,7 @@ impl AclTree {
                 });
                 result_map
                     .entry(item_list)
-                    .or_insert_with(BTreeSet::new)
+                    .or_default()
                     .insert(item.to_string());
             }
             result_map

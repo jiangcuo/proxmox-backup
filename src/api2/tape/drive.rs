@@ -3,6 +3,7 @@ use std::panic::UnwindSafe;
 use std::sync::Arc;
 
 use anyhow::{bail, format_err, Error};
+use pbs_tape::sg_tape::SgTape;
 use serde_json::Value;
 
 use proxmox_router::{
@@ -36,8 +37,7 @@ use crate::{
         changer::update_changer_online_status,
         drive::{
             get_tape_device_state, lock_tape_device, media_changer, open_drive,
-            open_lto_tape_drive, required_media_changer, set_tape_device_state, LtoTapeHandle,
-            TapeDriver,
+            required_media_changer, set_tape_device_state, LtoTapeHandle, TapeDriver,
         },
         encryption_keys::insert_key,
         file_formats::{MediaLabel, MediaSetLabel},
@@ -539,6 +539,14 @@ fn write_media_label(
     label: MediaLabel,
     pool: Option<String>,
 ) -> Result<(), Error> {
+    let mut inventory = Inventory::new(TAPE_STATUS_DIR);
+    inventory.reload()?;
+    if inventory
+        .find_media_by_label_text(&label.label_text)?
+        .is_some()
+    {
+        bail!("Media with label '{}' already exists", label.label_text);
+    }
     drive.label_tape(&label)?;
     if let Some(ref pool) = pool {
         task_log!(
@@ -562,8 +570,6 @@ fn write_media_label(
 
     // Create the media catalog
     MediaCatalog::overwrite(TAPE_STATUS_DIR, &media_id, false)?;
-
-    let mut inventory = Inventory::new(TAPE_STATUS_DIR);
     inventory.store(media_id.clone(), false)?;
 
     drive.rewind()?;
@@ -600,6 +606,8 @@ fn write_media_label(
 
     drive.rewind()?;
 
+    drive.write_additional_attributes(Some(media_id.label.label_text), pool);
+
     Ok(())
 }
 
@@ -625,7 +633,7 @@ pub async fn restore_key(drive: String, password: String) -> Result<(), Error> {
     run_drive_blocking_task(drive.clone(), "restore key".to_string(), move |config| {
         let mut drive = open_drive(&config, &drive)?;
 
-        let (_media_id, key_config) = drive.read_label()?;
+        let (_media_id, key_config) = drive.read_label_without_loading_key()?;
 
         if let Some(key_config) = key_config {
             let password_fn = || Ok(password.as_bytes().to_vec());
@@ -672,9 +680,6 @@ pub async fn read_label(drive: String, inventorize: Option<bool>) -> Result<Medi
         let label = if let Some(ref set) = media_id.media_set_label {
             let key = &set.encryption_key_fingerprint;
 
-            if let Err(err) = drive.set_encryption(key.clone().map(|fp| (fp, set.uuid.clone()))) {
-                eprintln!("unable to load encryption key: {}", err); // best-effort only
-            }
             MediaIdFlat {
                 ctime: media_id.label.ctime,
                 encryption_key_fingerprint: key.as_ref().map(|fp| fp.signature()),
@@ -828,17 +833,27 @@ pub async fn inventory(drive: String) -> Result<Vec<LabelUuidMap>, Error> {
 
             let label_text = label_text.to_string();
 
-            if let Some(media_id) = inventory.find_media_by_label_text(&label_text) {
-                list.push(LabelUuidMap {
-                    label_text,
-                    uuid: Some(media_id.label.uuid.clone()),
-                });
-            } else {
-                list.push(LabelUuidMap {
-                    label_text,
-                    uuid: None,
-                });
-            }
+            match inventory.find_media_by_label_text(&label_text) {
+                Ok(Some(media_id)) => {
+                    list.push(LabelUuidMap {
+                        label_text,
+                        uuid: Some(media_id.label.uuid.clone()),
+                    });
+                }
+                Ok(None) => {
+                    list.push(LabelUuidMap {
+                        label_text,
+                        uuid: None,
+                    });
+                }
+                Err(err) => {
+                    log::warn!("error getting unique media label: {err}");
+                    list.push(LabelUuidMap {
+                        label_text,
+                        uuid: None,
+                    });
+                }
+            };
         }
 
         Ok(list)
@@ -916,11 +931,21 @@ pub fn update_inventory(
                 let label_text = label_text.to_string();
 
                 if !read_all_labels {
-                    if let Some(media_id) = inventory.find_media_by_label_text(&label_text) {
-                        if !catalog || MediaCatalog::exists(TAPE_STATUS_DIR, &media_id.label.uuid) {
-                            task_log!(worker, "media '{}' already inventoried", label_text);
+                    match inventory.find_media_by_label_text(&label_text) {
+                        Ok(Some(media_id)) => {
+                            if !catalog
+                                || MediaCatalog::exists(TAPE_STATUS_DIR, &media_id.label.uuid)
+                            {
+                                task_log!(worker, "media '{}' already inventoried", label_text);
+                                continue;
+                            }
+                        }
+                        Err(err) => {
+                            task_warn!(worker, "error getting media by unique label: {err}");
+                            // we can't be sure which uuid it is
                             continue;
                         }
+                        Ok(None) => {} // ok to inventorize
                     }
                 }
 
@@ -1079,13 +1104,20 @@ fn barcode_label_media_worker(
         }
 
         inventory.reload()?;
-        if inventory.find_media_by_label_text(&label_text).is_some() {
-            task_log!(
-                worker,
-                "media '{}' already inventoried (already labeled)",
-                label_text
-            );
-            continue;
+        match inventory.find_media_by_label_text(&label_text) {
+            Ok(Some(_)) => {
+                task_log!(
+                    worker,
+                    "media '{}' already inventoried (already labeled)",
+                    label_text
+                );
+                continue;
+            }
+            Err(err) => {
+                task_warn!(worker, "error getting media by unique label: {err}",);
+                continue;
+            }
+            Ok(None) => {} // ok to label
         }
 
         task_log!(worker, "checking/loading media '{}'", label_text);
@@ -1159,7 +1191,7 @@ pub async fn cartridge_memory(drive: String) -> Result<Vec<MamAttribute>, Error>
         "reading cartridge memory".to_string(),
         move |config| {
             let drive_config: LtoTapeDrive = config.lookup("lto", &drive)?;
-            let mut handle = open_lto_tape_drive(&drive_config)?;
+            let mut handle = LtoTapeHandle::open_lto_drive(&drive_config)?;
 
             handle.cartridge_memory()
         },
@@ -1189,7 +1221,7 @@ pub async fn volume_statistics(drive: String) -> Result<Lp17VolumeStatistics, Er
         "reading volume statistics".to_string(),
         move |config| {
             let drive_config: LtoTapeDrive = config.lookup("lto", &drive)?;
-            let mut handle = open_lto_tape_drive(&drive_config)?;
+            let mut handle = LtoTapeHandle::open_lto_drive(&drive_config)?;
 
             handle.volume_statistics()
         },
@@ -1326,12 +1358,6 @@ pub fn catalog_media(
                         inventory.store(media_id.clone(), false)?;
                         return Ok(());
                     }
-                    let encrypt_fingerprint = set
-                        .encryption_key_fingerprint
-                        .clone()
-                        .map(|fp| (fp, set.uuid.clone()));
-
-                    drive.set_encryption(encrypt_fingerprint)?;
 
                     let _pool_lock = lock_media_pool(TAPE_STATUS_DIR, &set.pool)?;
                     let media_set_lock = lock_media_set(TAPE_STATUS_DIR, &set.uuid, None)?;
@@ -1388,6 +1414,12 @@ pub fn catalog_media(
                 schema: CHANGER_NAME_SCHEMA,
                 optional: true,
             },
+            "query-activity": {
+                type: bool,
+                description: "If true, queries and returns the drive activity for each drive.",
+                optional: true,
+                default: false,
+            },
         },
     },
     returns: {
@@ -1405,6 +1437,7 @@ pub fn catalog_media(
 /// List drives
 pub fn list_drives(
     changer: Option<String>,
+    query_activity: bool,
     _param: Value,
     rpcenv: &mut dyn RpcEnvironment,
 ) -> Result<Vec<DriveListEntry>, Error> {
@@ -1431,10 +1464,16 @@ pub fn list_drives(
 
         let info = lookup_device_identification(&lto_drives, &drive.path);
         let state = get_tape_device_state(&config, &drive.name)?;
+        let activity = if query_activity {
+            SgTape::device_activity(&drive).ok()
+        } else {
+            None
+        };
         let entry = DriveListEntry {
             config: drive,
             info,
             state,
+            activity,
         };
         list.push(entry);
     }

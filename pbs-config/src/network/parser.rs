@@ -1,3 +1,5 @@
+use crate::network::VLAN_INTERFACE_REGEX;
+
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::iter::{Iterator, Peekable};
@@ -192,7 +194,7 @@ impl<R: BufRead> NetworkParser<R> {
         self.eat(Token::Gateway)?;
         let gateway = self.next_text()?;
 
-        if pbs_api_types::common_regex::IP_REGEX.is_match(&gateway) {
+        if pbs_api_types::IP_REGEX.is_match(&gateway) {
             if gateway.contains(':') {
                 set_gateway_v6(interface, gateway)?;
             } else {
@@ -361,6 +363,20 @@ impl<R: BufRead> NetworkParser<R> {
                     interface.bond_xmit_hash_policy = Some(policy);
                     self.eat(Token::Newline)?;
                 }
+                Token::VlanId => {
+                    self.eat(Token::VlanId)?;
+                    let vlan_id = self.next_text()?.parse()?;
+                    interface.vlan_id = Some(vlan_id);
+                    set_interface_type(interface, NetworkInterfaceType::Vlan)?;
+                    self.eat(Token::Newline)?;
+                }
+                Token::VlanRawDevice => {
+                    self.eat(Token::VlanRawDevice)?;
+                    let vlan_raw_device = self.next_text()?;
+                    interface.vlan_raw_device = Some(vlan_raw_device);
+                    set_interface_type(interface, NetworkInterfaceType::Vlan)?;
+                    self.eat(Token::Newline)?;
+                }
                 _ => {
                     // parse addon attributes
                     let option = self.parse_to_eol()?;
@@ -473,11 +489,11 @@ impl<R: BufRead> NetworkParser<R> {
         &mut self,
         existing_interfaces: Option<&HashMap<String, bool>>,
     ) -> Result<NetworkConfig, Error> {
-        self._parse_interfaces(existing_interfaces)
+        self.do_parse_interfaces(existing_interfaces)
             .map_err(|err| format_err!("line {}: {}", self.line_nr, err))
     }
 
-    pub fn _parse_interfaces(
+    fn do_parse_interfaces(
         &mut self,
         existing_interfaces: Option<&HashMap<String, bool>>,
     ) -> Result<NetworkConfig, Error> {
@@ -522,7 +538,6 @@ impl<R: BufRead> NetworkParser<R> {
 
         lazy_static! {
             static ref INTERFACE_ALIAS_REGEX: Regex = Regex::new(r"^\S+:\d+$").unwrap();
-            static ref VLAN_INTERFACE_REGEX: Regex = Regex::new(r"^\S+\.\d+$").unwrap();
         }
 
         if let Some(existing_interfaces) = existing_interfaces {
@@ -600,5 +615,233 @@ impl<R: BufRead> NetworkParser<R> {
         }
 
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod test {
+
+    use anyhow::Error;
+
+    use super::*;
+
+    #[test]
+    fn test_network_config_create_lo_1() -> Result<(), Error> {
+        let input = "";
+
+        let mut parser = NetworkParser::new(input.as_bytes());
+
+        let config = parser.parse_interfaces(None)?;
+
+        let output = String::try_from(config)?;
+
+        let expected = "auto lo\niface lo inet loopback\n\n";
+        assert_eq!(output, expected);
+
+        // run again using output as input
+        let mut parser = NetworkParser::new(output.as_bytes());
+
+        let config = parser.parse_interfaces(None)?;
+
+        let output = String::try_from(config)?;
+
+        assert_eq!(output, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_network_config_create_lo_2() -> Result<(), Error> {
+        let input = "#c1\n\n#c2\n\niface test inet manual\n";
+
+        let mut parser = NetworkParser::new(input.as_bytes());
+
+        let config = parser.parse_interfaces(None)?;
+
+        let output = String::try_from(config)?;
+
+        // Note: loopback should be added in front of other interfaces
+        let expected = "#c1\n#c2\n\nauto lo\niface lo inet loopback\n\niface test inet manual\n\n";
+        assert_eq!(output, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_network_config_parser_no_blank_1() -> Result<(), Error> {
+        let input = "auto lo\n\
+                     iface lo inet loopback\n\
+                     iface lo inet6 loopback\n\
+                     auto ens18\n\
+                     iface ens18 inet static\n\
+                     \taddress 192.168.20.144/20\n\
+                     \tgateway 192.168.16.1\n\
+                     # comment\n\
+                     iface ens20 inet static\n\
+                     \taddress 192.168.20.145/20\n\
+                     iface ens21 inet manual\n\
+                     iface ens22 inet manual\n";
+
+        let mut parser = NetworkParser::new(input.as_bytes());
+
+        let config = parser.parse_interfaces(None)?;
+
+        let output = String::try_from(config)?;
+
+        let expected = "auto lo\n\
+                        iface lo inet loopback\n\
+                        \n\
+                        iface lo inet6 loopback\n\
+                        \n\
+                        auto ens18\n\
+                        iface ens18 inet static\n\
+                        \taddress 192.168.20.144/20\n\
+                        \tgateway 192.168.16.1\n\
+                        #comment\n\
+                        \n\
+                        iface ens20 inet static\n\
+                        \taddress 192.168.20.145/20\n\
+                        \n\
+                        iface ens21 inet manual\n\
+                        \n\
+                        iface ens22 inet manual\n\
+                        \n";
+        assert_eq!(output, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_network_config_parser_no_blank_2() -> Result<(), Error> {
+        // Adapted from bug 2926
+        let input = "### Hetzner Online GmbH installimage\n\
+                     \n\
+                     source /etc/network/interfaces.d/*\n\
+                     \n\
+                     auto lo\n\
+                     iface lo inet loopback\n\
+                     iface lo inet6 loopback\n\
+                     \n\
+                     auto enp4s0\n\
+                     iface enp4s0 inet static\n\
+                     \taddress 10.10.10.10/24\n\
+                     \tgateway 10.10.10.1\n\
+                     \t# route 10.10.20.10/24 via 10.10.20.1\n\
+                     \tup route add -net 10.10.20.10 netmask 255.255.255.0 gw 10.10.20.1 dev enp4s0\n\
+                     \n\
+                     iface enp4s0 inet6 static\n\
+                     \taddress fe80::5496:35ff:fe99:5a6a/64\n\
+                     \tgateway fe80::1\n";
+
+        let mut parser = NetworkParser::new(input.as_bytes());
+
+        let config = parser.parse_interfaces(None)?;
+
+        let output = String::try_from(config)?;
+
+        let expected = "### Hetzner Online GmbH installimage\n\
+                        \n\
+                        source /etc/network/interfaces.d/*\n\
+                        \n\
+                        auto lo\n\
+                        iface lo inet loopback\n\
+                        \n\
+                        iface lo inet6 loopback\n\
+                        \n\
+                        auto enp4s0\n\
+                        iface enp4s0 inet static\n\
+                        \taddress 10.10.10.10/24\n\
+                        \tgateway 10.10.10.1\n\
+                        \t# route 10.10.20.10/24 via 10.10.20.1\n\
+                        \tup route add -net 10.10.20.10 netmask 255.255.255.0 gw 10.10.20.1 dev enp4s0\n\
+                        \n\
+                        iface enp4s0 inet6 static\n\
+                        \taddress fe80::5496:35ff:fe99:5a6a/64\n\
+                        \tgateway fe80::1\n\
+                        \n";
+        assert_eq!(output, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_network_config_parser_vlan_id_in_name() {
+        let input = "iface vmbr0.100 inet static manual";
+        let mut parser = NetworkParser::new(input.as_bytes());
+        let config = parser.parse_interfaces(None).unwrap();
+
+        let iface = config.interfaces.get("vmbr0.100").unwrap();
+        assert_eq!(iface.interface_type, NetworkInterfaceType::Vlan);
+        assert_eq!(iface.vlan_raw_device, None);
+        assert_eq!(iface.vlan_id, None);
+    }
+
+    #[test]
+    fn test_network_config_parser_vlan_with_raw_device() {
+        let input = r#"
+iface vlan100 inet manual
+	vlan-raw-device vmbr0"#;
+
+        let mut parser = NetworkParser::new(input.as_bytes());
+        let config = parser.parse_interfaces(None).unwrap();
+
+        let iface = config.interfaces.get("vlan100").unwrap();
+        assert_eq!(iface.interface_type, NetworkInterfaceType::Vlan);
+        assert_eq!(iface.vlan_raw_device, Some(String::from("vmbr0")));
+        assert_eq!(iface.vlan_id, None);
+    }
+
+    #[test]
+    fn test_network_config_parser_vlan_with_raw_device_static() {
+        let input = r#"
+iface vlan100 inet static
+	vlan-raw-device vmbr0
+	address 10.0.0.100/16"#;
+
+        let mut parser = NetworkParser::new(input.as_bytes());
+        let config = parser.parse_interfaces(None).unwrap();
+
+        let iface = config.interfaces.get("vlan100").unwrap();
+        assert_eq!(iface.interface_type, NetworkInterfaceType::Vlan);
+        assert_eq!(iface.vlan_raw_device, Some(String::from("vmbr0")));
+        assert_eq!(iface.vlan_id, None);
+        assert_eq!(iface.method, Some(NetworkConfigMethod::Static));
+        assert_eq!(iface.cidr, Some(String::from("10.0.0.100/16")));
+    }
+
+    #[test]
+    fn test_network_config_parser_vlan_individual_name() {
+        let input = r#"
+iface individual_name inet manual
+	vlan-id 100
+	vlan-raw-device vmbr0"#;
+
+        let mut parser = NetworkParser::new(input.as_bytes());
+        let config = parser.parse_interfaces(None).unwrap();
+
+        let iface = config.interfaces.get("individual_name").unwrap();
+        assert_eq!(iface.interface_type, NetworkInterfaceType::Vlan);
+        assert_eq!(iface.vlan_raw_device, Some(String::from("vmbr0")));
+        assert_eq!(iface.vlan_id, Some(100));
+    }
+
+    #[test]
+    fn test_network_config_parser_vlan_individual_name_static() {
+        let input = r#"
+iface individual_name inet static
+	vlan-id 100
+	vlan-raw-device vmbr0
+	address 10.0.0.100/16
+"#;
+
+        let mut parser = NetworkParser::new(input.as_bytes());
+        let config = parser.parse_interfaces(None).unwrap();
+
+        let iface = config.interfaces.get("individual_name").unwrap();
+        assert_eq!(iface.interface_type, NetworkInterfaceType::Vlan);
+        assert_eq!(iface.vlan_raw_device, Some(String::from("vmbr0")));
+        assert_eq!(iface.vlan_id, Some(100));
+        assert_eq!(iface.method, Some(NetworkConfigMethod::Static));
+        assert_eq!(iface.cidr, Some(String::from("10.0.0.100/16")));
     }
 }

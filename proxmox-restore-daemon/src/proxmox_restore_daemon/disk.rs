@@ -37,6 +37,7 @@ lazy_static! {
         m.insert("ufs", "ufstype=ufs2");
 
         m.insert("ntfs", "utf8");
+        m.insert("ntfs3", "iocharset=utf8");
 
         m
     };
@@ -633,12 +634,21 @@ impl DiskState {
             _ => bail!("no or invalid image in path"),
         };
 
-        let buckets = match self.disk_map.get_mut(
-            req_fidx
-                .strip_suffix(".img.fidx")
-                .unwrap_or_else(|| req_fidx.as_ref()),
-        ) {
+        let serial = req_fidx
+            .strip_suffix(".img.fidx")
+            .unwrap_or_else(|| req_fidx.as_ref());
+        let buckets = match self.disk_map.get_mut(serial) {
             Some(x) => x,
+            None if serial.len() > 20 => {
+                let (truncated_serial, _) = serial.split_at(20);
+                eprintln!(
+                    "given image '{req_fidx}' not found with '{serial}', trying with '{truncated_serial}'."
+                );
+                match self.disk_map.get_mut(truncated_serial) {
+                    Some(x) => x,
+                    None => bail!("given image '{req_fidx}' not found with '{truncated_serial}'"),
+                }
+            }
             None => bail!("given image '{req_fidx}' not found"),
         };
 

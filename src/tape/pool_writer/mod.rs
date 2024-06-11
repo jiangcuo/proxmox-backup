@@ -25,12 +25,17 @@ use crate::tape::{
     file_formats::{
         tape_write_catalog, tape_write_snapshot_archive, ChunkArchiveWriter, MediaSetLabel,
     },
-    MediaCatalog, MediaId, MediaPool, COMMIT_BLOCK_SIZE, MAX_CHUNK_ARCHIVE_SIZE, TAPE_STATUS_DIR,
+    MediaCatalog, MediaId, MediaPool, TapeNotificationMode, COMMIT_BLOCK_SIZE,
+    MAX_CHUNK_ARCHIVE_SIZE, TAPE_STATUS_DIR,
 };
 
 use super::file_formats::{
     PROXMOX_BACKUP_CATALOG_ARCHIVE_MAGIC_1_0, PROXMOX_BACKUP_CATALOG_ARCHIVE_MAGIC_1_1,
 };
+
+// Warn when the sequence number reaches this limit, as large
+// media sets are error prone and take a very long time to restore from.
+const MEDIA_SET_SEQ_NR_WARN_LIMIT: u64 = 20;
 
 struct PoolWriterState {
     drive: Box<dyn TapeDriver>,
@@ -38,8 +43,8 @@ struct PoolWriterState {
     media_uuid: Uuid,
     // tell if we already moved to EOM
     at_eom: bool,
-    // bytes written after the last tape fush/sync
-    bytes_written: usize,
+    // bytes written after the last tape flush/sync and catalog commit
+    bytes_written_after_sync: usize,
 }
 
 /// Helper to manage a backup job, writing several tapes of a pool
@@ -48,7 +53,7 @@ pub struct PoolWriter {
     drive_name: String,
     status: Option<PoolWriterState>,
     catalog_set: Arc<Mutex<CatalogSet>>,
-    notify_email: Option<String>,
+    notification_mode: TapeNotificationMode,
     ns_magic: bool,
     used_tapes: HashSet<Uuid>,
 }
@@ -58,7 +63,7 @@ impl PoolWriter {
         mut pool: MediaPool,
         drive_name: &str,
         worker: &WorkerTask,
-        notify_email: Option<String>,
+        notification_mode: TapeNotificationMode,
         force_media_set: bool,
         ns_magic: bool,
     ) -> Result<Self, Error> {
@@ -86,7 +91,7 @@ impl PoolWriter {
             drive_name: drive_name.to_string(),
             status: None,
             catalog_set: Arc::new(Mutex::new(catalog_set)),
-            notify_email,
+            notification_mode,
             ns_magic,
             used_tapes: HashSet::new(),
         })
@@ -195,8 +200,17 @@ impl PoolWriter {
     /// This is done automatically during a backupsession, but needs to
     /// be called explicitly before dropping the PoolWriter
     pub fn commit(&mut self) -> Result<(), Error> {
-        if let Some(PoolWriterState { ref mut drive, .. }) = self.status {
-            drive.sync()?; // sync all data to the tape
+        if let Some(ref mut status) = self.status {
+            status.drive.sync()?; // sync all data to the tape
+            status.bytes_written_after_sync = 0; // reset bytes written
+
+            // not all drives support that
+            if let Ok(stats) = status.drive.get_volume_statistics() {
+                self.pool.set_media_bytes_used(
+                    &status.media_uuid,
+                    Some(stats.total_used_native_capacity),
+                )?;
+            }
         }
         self.catalog_set.lock().unwrap().commit()?; // then commit the catalog
         Ok(())
@@ -231,7 +245,13 @@ impl PoolWriter {
         );
 
         if let Some(PoolWriterState { mut drive, .. }) = self.status.take() {
-            if last_media_uuid.is_some() {
+            if let Some(uuid) = &last_media_uuid {
+                // not all drives support that
+                if let Ok(stats) = drive.get_volume_statistics() {
+                    self.pool
+                        .set_media_bytes_used(uuid, Some(stats.total_used_native_capacity))?;
+                }
+
                 task_log!(worker, "eject current media");
                 drive.eject_media()?;
             }
@@ -244,7 +264,7 @@ impl PoolWriter {
             &drive_config,
             &self.drive_name,
             media.label(),
-            &self.notify_email,
+            &self.notification_mode,
         )?;
 
         // test for critical tape alert flags
@@ -272,18 +292,21 @@ impl PoolWriter {
 
         let media_set = media.media_set_label().unwrap();
 
-        let encrypt_fingerprint = media_set
-            .encryption_key_fingerprint
-            .clone()
-            .map(|fp| (fp, media_set.uuid.clone()));
+        if is_new_media && media_set.seq_nr >= MEDIA_SET_SEQ_NR_WARN_LIMIT {
+            task_warn!(
+                worker,
+                "large media-set detected ({}), consider using a different allocation policy",
+                media_set.seq_nr
+            );
+        }
 
-        drive.set_encryption(encrypt_fingerprint)?;
+        drive.assert_encryption_mode(media_set.encryption_key_fingerprint.is_some())?;
 
         self.status = Some(PoolWriterState {
             drive,
             media_uuid: media_uuid.clone(),
             at_eom: false,
-            bytes_written: 0,
+            bytes_written_after_sync: 0,
         });
 
         if is_new_media {
@@ -472,9 +495,9 @@ impl PoolWriter {
             }
         };
 
-        status.bytes_written += bytes_written;
+        status.bytes_written_after_sync += bytes_written;
 
-        let request_sync = status.bytes_written >= COMMIT_BLOCK_SIZE;
+        let request_sync = status.bytes_written_after_sync >= COMMIT_BLOCK_SIZE;
 
         if !done || request_sync {
             self.commit()?;
@@ -507,7 +530,7 @@ impl PoolWriter {
         let (saved_chunks, content_uuid, leom, bytes_written) =
             write_chunk_archive(worker, writer, chunk_iter, store, MAX_CHUNK_ARCHIVE_SIZE)?;
 
-        status.bytes_written += bytes_written;
+        status.bytes_written_after_sync += bytes_written;
 
         let elapsed = start_time.elapsed()?.as_secs_f64();
         task_log!(
@@ -518,7 +541,7 @@ impl PoolWriter {
             (bytes_written as f64) / (1_000_000.0 * elapsed),
         );
 
-        let request_sync = status.bytes_written >= COMMIT_BLOCK_SIZE;
+        let request_sync = status.bytes_written_after_sync >= COMMIT_BLOCK_SIZE;
 
         // register chunks in media_catalog
         self.catalog_set.lock().unwrap().register_chunk_archive(

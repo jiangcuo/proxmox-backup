@@ -25,6 +25,8 @@ use crate::{open_backup_lockfile, BackupLockGuard};
 
 lazy_static! {
     static ref PHYSICAL_NIC_REGEX: Regex = Regex::new(r"^(?:eth\d+|en[^:.]+|ib\d+)$").unwrap();
+    static ref VLAN_INTERFACE_REGEX: Regex =
+        Regex::new(r"^(?P<vlan_raw_device>\S+)\.(?P<vlan_id>\d+)|vlan(?P<vlan_id2>\d+)$").unwrap();
 }
 
 pub fn is_physical_nic(iface: &str) -> bool {
@@ -39,6 +41,21 @@ pub fn bond_mode_from_str(s: &str) -> Result<LinuxBondMode, Error> {
 pub fn bond_xmit_hash_policy_from_str(s: &str) -> Result<BondXmitHashPolicy, Error> {
     BondXmitHashPolicy::deserialize(s.into_deserializer())
         .map_err(|_: value::Error| format_err!("invalid bond_xmit_hash_policy '{}'", s))
+}
+
+pub fn parse_vlan_id_from_name(iface_name: &str) -> Option<u16> {
+    VLAN_INTERFACE_REGEX.captures(iface_name).and_then(|cap| {
+        cap.name("vlan_id")
+            .or(cap.name("vlan_id2"))
+            .and_then(|id| id.as_str().parse::<u16>().ok())
+    })
+}
+
+pub fn parse_vlan_raw_device_from_name(iface_name: &str) -> Option<&str> {
+    VLAN_INTERFACE_REGEX
+        .captures(iface_name)
+        .and_then(|cap| cap.name("vlan_raw_device"))
+        .map(Into::into)
 }
 
 // Write attributes not depending on address family
@@ -77,6 +94,14 @@ fn write_iface_attributes(iface: &Interface, w: &mut dyn Write) -> Result<(), Er
                 writeln!(w, "\tbond-slaves none")?;
             } else {
                 writeln!(w, "\tbond-slaves {}", slaves.join(" "))?;
+            }
+        }
+        NetworkInterfaceType::Vlan => {
+            if let Some(vlan_id) = iface.vlan_id {
+                writeln!(w, "\tvlan-id {vlan_id}")?;
+            }
+            if let Some(vlan_raw_device) = &iface.vlan_raw_device {
+                writeln!(w, "\tvlan-raw-device {vlan_raw_device}")?;
             }
         }
         _ => {}
@@ -243,7 +268,7 @@ impl NetworkConfig {
     }
 
     /// Check if ports are used only once
-    pub fn check_port_usage(&self) -> Result<(), Error> {
+    fn check_port_usage(&self) -> Result<(), Error> {
         let mut used_ports = HashMap::new();
         let mut check_port_usage = |iface, ports: &Vec<String>| {
             for port in ports.iter() {
@@ -272,7 +297,7 @@ impl NetworkConfig {
     }
 
     /// Check if child mtu is less or equal than parent mtu
-    pub fn check_mtu(&self, parent_name: &str, child_name: &str) -> Result<(), Error> {
+    fn check_mtu(&self, parent_name: &str, child_name: &str) -> Result<(), Error> {
         let parent = self
             .interfaces
             .get(parent_name)
@@ -312,7 +337,7 @@ impl NetworkConfig {
     }
 
     /// Check if bond slaves exists
-    pub fn check_bond_slaves(&self) -> Result<(), Error> {
+    fn check_bond_slaves(&self) -> Result<(), Error> {
         for (iface, interface) in self.interfaces.iter() {
             if let Some(slaves) = &interface.slaves {
                 for slave in slaves.iter() {
@@ -340,7 +365,7 @@ impl NetworkConfig {
     }
 
     /// Check if bridge ports exists
-    pub fn check_bridge_ports(&self) -> Result<(), Error> {
+    fn check_bridge_ports(&self) -> Result<(), Error> {
         lazy_static! {
             static ref VLAN_INTERFACE_REGEX: Regex = Regex::new(r"^(\S+)\.(\d+)$").unwrap();
         }
@@ -364,7 +389,7 @@ impl NetworkConfig {
         Ok(())
     }
 
-    pub fn write_config(&self, w: &mut dyn Write) -> Result<(), Error> {
+    fn write_config(&self, w: &mut dyn Write) -> Result<(), Error> {
         self.check_port_usage()?;
         self.check_bond_slaves()?;
         self.check_bridge_ports()?;
@@ -505,148 +530,161 @@ pub fn complete_port_list(arg: &str, _param: &HashMap<String, String>) -> Vec<St
 }
 
 #[cfg(test)]
-mod test {
-
-    use anyhow::Error;
-
+mod tests {
     use super::*;
 
+    use NetworkConfigMethod::*;
+    use NetworkInterfaceType::*;
+    use NetworkOrderEntry::*;
+
     #[test]
-    fn test_network_config_create_lo_1() -> Result<(), Error> {
-        let input = "";
+    fn test_write_network_config_manual() {
+        let iface_name = String::from("enp3s0");
+        let mut iface = Interface::new(iface_name.clone());
+        iface.interface_type = Eth;
+        iface.method = Some(Manual);
+        iface.active = true;
 
-        let mut parser = NetworkParser::new(input.as_bytes());
+        let nw_config = NetworkConfig {
+            interfaces: BTreeMap::from([(iface_name.clone(), iface)]),
+            order: vec![Iface(iface_name.clone())],
+        };
 
-        let config = parser.parse_interfaces(None)?;
-
-        let output = String::try_from(config)?;
-
-        let expected = "auto lo\niface lo inet loopback\n\n";
-        assert_eq!(output, expected);
-
-        // run again using output as input
-        let mut parser = NetworkParser::new(output.as_bytes());
-
-        let config = parser.parse_interfaces(None)?;
-
-        let output = String::try_from(config)?;
-
-        assert_eq!(output, expected);
-
-        Ok(())
+        assert_eq!(
+            String::try_from(nw_config).unwrap().trim(),
+            r#"iface enp3s0 inet manual"#
+        );
     }
 
     #[test]
-    fn test_network_config_create_lo_2() -> Result<(), Error> {
-        let input = "#c1\n\n#c2\n\niface test inet manual\n";
+    fn test_write_network_config_static() {
+        let iface_name = String::from("enp3s0");
+        let mut iface = Interface::new(iface_name.clone());
+        iface.interface_type = Eth;
+        iface.method = Some(Static);
+        iface.cidr = Some(String::from("10.0.0.100/16"));
+        iface.active = true;
 
-        let mut parser = NetworkParser::new(input.as_bytes());
-
-        let config = parser.parse_interfaces(None)?;
-
-        let output = String::try_from(config)?;
-
-        // Note: loopback should be added in front of other interfaces
-        let expected = "#c1\n#c2\n\nauto lo\niface lo inet loopback\n\niface test inet manual\n\n";
-        assert_eq!(output, expected);
-
-        Ok(())
+        let nw_config = NetworkConfig {
+            interfaces: BTreeMap::from([(iface_name.clone(), iface)]),
+            order: vec![Iface(iface_name.clone())],
+        };
+        assert_eq!(
+            String::try_from(nw_config).unwrap().trim(),
+            format!(
+                r#"
+iface enp3s0 inet static
+	address 10.0.0.100/16"#
+            )
+            .trim()
+        );
     }
 
     #[test]
-    fn test_network_config_parser_no_blank_1() -> Result<(), Error> {
-        let input = "auto lo\n\
-                     iface lo inet loopback\n\
-                     iface lo inet6 loopback\n\
-                     auto ens18\n\
-                     iface ens18 inet static\n\
-                     \taddress 192.168.20.144/20\n\
-                     \tgateway 192.168.16.1\n\
-                     # comment\n\
-                     iface ens20 inet static\n\
-                     \taddress 192.168.20.145/20\n\
-                     iface ens21 inet manual\n\
-                     iface ens22 inet manual\n";
+    fn test_write_network_config_static_with_gateway() {
+        let iface_name = String::from("enp3s0");
+        let mut iface = Interface::new(iface_name.clone());
+        iface.interface_type = Eth;
+        iface.method = Some(Static);
+        iface.cidr = Some(String::from("10.0.0.100/16"));
+        iface.gateway = Some(String::from("10.0.0.1"));
+        iface.active = true;
 
-        let mut parser = NetworkParser::new(input.as_bytes());
-
-        let config = parser.parse_interfaces(None)?;
-
-        let output = String::try_from(config)?;
-
-        let expected = "auto lo\n\
-                        iface lo inet loopback\n\
-                        \n\
-                        iface lo inet6 loopback\n\
-                        \n\
-                        auto ens18\n\
-                        iface ens18 inet static\n\
-                        \taddress 192.168.20.144/20\n\
-                        \tgateway 192.168.16.1\n\
-                        #comment\n\
-                        \n\
-                        iface ens20 inet static\n\
-                        \taddress 192.168.20.145/20\n\
-                        \n\
-                        iface ens21 inet manual\n\
-                        \n\
-                        iface ens22 inet manual\n\
-                        \n";
-        assert_eq!(output, expected);
-
-        Ok(())
+        let nw_config = NetworkConfig {
+            interfaces: BTreeMap::from([(iface_name.clone(), iface)]),
+            order: vec![Iface(iface_name.clone())],
+        };
+        assert_eq!(
+            String::try_from(nw_config).unwrap().trim(),
+            format!(
+                r#"
+iface enp3s0 inet static
+	address 10.0.0.100/16
+	gateway 10.0.0.1"#
+            )
+            .trim()
+        );
     }
 
     #[test]
-    fn test_network_config_parser_no_blank_2() -> Result<(), Error> {
-        // Adapted from bug 2926
-        let input = "### Hetzner Online GmbH installimage\n\
-                     \n\
-                     source /etc/network/interfaces.d/*\n\
-                     \n\
-                     auto lo\n\
-                     iface lo inet loopback\n\
-                     iface lo inet6 loopback\n\
-                     \n\
-                     auto enp4s0\n\
-                     iface enp4s0 inet static\n\
-                     \taddress 10.10.10.10/24\n\
-                     \tgateway 10.10.10.1\n\
-                     \t# route 10.10.20.10/24 via 10.10.20.1\n\
-                     \tup route add -net 10.10.20.10 netmask 255.255.255.0 gw 10.10.20.1 dev enp4s0\n\
-                     \n\
-                     iface enp4s0 inet6 static\n\
-                     \taddress fe80::5496:35ff:fe99:5a6a/64\n\
-                     \tgateway fe80::1\n";
+    fn test_write_network_config_vlan_id_in_name() {
+        let iface_name = String::from("vmbr0.100");
+        let mut iface = Interface::new(iface_name.clone());
+        iface.interface_type = Vlan;
+        iface.method = Some(Manual);
+        iface.active = true;
 
-        let mut parser = NetworkParser::new(input.as_bytes());
+        let nw_config = NetworkConfig {
+            interfaces: BTreeMap::from([(iface_name.clone(), iface)]),
+            order: vec![Iface(iface_name.clone())],
+        };
+        assert_eq!(
+            String::try_from(nw_config).unwrap().trim(),
+            "iface vmbr0.100 inet manual"
+        );
+    }
 
-        let config = parser.parse_interfaces(None)?;
+    #[test]
+    fn test_write_network_config_vlan_with_raw_device() {
+        let iface_name = String::from("vlan100");
+        let mut iface = Interface::new(iface_name.clone());
+        iface.interface_type = Vlan;
+        iface.vlan_raw_device = Some(String::from("vmbr0"));
+        iface.method = Some(Manual);
+        iface.active = true;
 
-        let output = String::try_from(config)?;
+        let nw_config = NetworkConfig {
+            interfaces: BTreeMap::from([(iface_name.clone(), iface)]),
+            order: vec![Iface(iface_name.clone())],
+        };
+        assert_eq!(
+            String::try_from(nw_config).unwrap().trim(),
+            r#"
+iface vlan100 inet manual
+	vlan-raw-device vmbr0"#
+                .trim()
+        );
+    }
 
-        let expected = "### Hetzner Online GmbH installimage\n\
-                        \n\
-                        source /etc/network/interfaces.d/*\n\
-                        \n\
-                        auto lo\n\
-                        iface lo inet loopback\n\
-                        \n\
-                        iface lo inet6 loopback\n\
-                        \n\
-                        auto enp4s0\n\
-                        iface enp4s0 inet static\n\
-                        \taddress 10.10.10.10/24\n\
-                        \tgateway 10.10.10.1\n\
-                        \t# route 10.10.20.10/24 via 10.10.20.1\n\
-                        \tup route add -net 10.10.20.10 netmask 255.255.255.0 gw 10.10.20.1 dev enp4s0\n\
-                        \n\
-                        iface enp4s0 inet6 static\n\
-                        \taddress fe80::5496:35ff:fe99:5a6a/64\n\
-                        \tgateway fe80::1\n\
-                        \n";
-        assert_eq!(output, expected);
+    #[test]
+    fn test_write_network_config_vlan_with_individual_name() {
+        let iface_name = String::from("individual_name");
+        let mut iface = Interface::new(iface_name.clone());
+        iface.interface_type = Vlan;
+        iface.vlan_raw_device = Some(String::from("vmbr0"));
+        iface.vlan_id = Some(100);
+        iface.method = Some(Manual);
+        iface.active = true;
 
-        Ok(())
+        let nw_config = NetworkConfig {
+            interfaces: BTreeMap::from([(iface_name.clone(), iface)]),
+            order: vec![Iface(iface_name.clone())],
+        };
+        assert_eq!(
+            String::try_from(nw_config).unwrap().trim(),
+            r#"
+iface individual_name inet manual
+	vlan-id 100
+	vlan-raw-device vmbr0"#
+                .trim()
+        );
+    }
+
+    #[test]
+    fn test_vlan_parse_vlan_id_from_name() {
+        assert_eq!(parse_vlan_id_from_name("vlan100"), Some(100));
+        assert_eq!(parse_vlan_id_from_name("vlan"), None);
+        assert_eq!(parse_vlan_id_from_name("arbitrary"), None);
+        assert_eq!(parse_vlan_id_from_name("vmbr0.100"), Some(100));
+        assert_eq!(parse_vlan_id_from_name("vmbr0"), None);
+        // assert_eq!(parse_vlan_id_from_name("vmbr0.1.400"), Some(400));   // NOTE ifupdown2 does actually support this
+    }
+
+    #[test]
+    fn test_vlan_parse_vlan_raw_device_from_name() {
+        assert_eq!(parse_vlan_raw_device_from_name("vlan100"), None);
+        assert_eq!(parse_vlan_raw_device_from_name("arbitrary"), None);
+        assert_eq!(parse_vlan_raw_device_from_name("vmbr0"), None);
+        assert_eq!(parse_vlan_raw_device_from_name("vmbr0.200"), Some("vmbr0"));
     }
 }

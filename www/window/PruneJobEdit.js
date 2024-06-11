@@ -105,7 +105,9 @@ Ext.define('PBS.window.PruneJobEdit', {
 		xtype: 'pbsNamespaceMaxDepthReduced',
 		name: 'max-depth',
 		fieldLabel: gettext('Max. Depth'),
-		deleteEmpty: true,
+		cbind: {
+		    deleteEmpty: '{!isCreate}',
+		},
 	    },
 	],
 
@@ -114,10 +116,9 @@ Ext.define('PBS.window.PruneJobEdit', {
 		fieldLabel: gettext('Prune Schedule'),
 		xtype: 'pbsCalendarEvent',
 		name: 'schedule',
-		emptyText: gettext('none (disabled)'),
+		allowBlank: false,
 		cbind: {
-			deleteEmpty: '{!isCreate}',
-			value: '{scheduleValue}',
+		    value: '{scheduleValue}',
 		},
 	    },
 	    {
@@ -133,6 +134,9 @@ Ext.define('PBS.window.PruneJobEdit', {
 	columnB: [
 	    {
 		xtype: 'pbsPruneInputPanel',
+		cbind: {
+		    isCreate: '{isCreate}',
+		},
 		getValues: () => ({}), // let that handle our inputpanel here
 	    },
 	    {

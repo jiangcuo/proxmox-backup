@@ -253,7 +253,7 @@ pub enum DeletableProperty {
 )]
 /// Update user configuration.
 #[allow(clippy::too_many_arguments)]
-pub fn update_user(
+pub async fn update_user(
     userid: Userid,
     update: UserUpdater,
     password: Option<String>,
@@ -261,6 +261,10 @@ pub fn update_user(
     digest: Option<String>,
     rpcenv: &mut dyn RpcEnvironment,
 ) -> Result<(), Error> {
+    if password.is_some() {
+        super::user_update_auth(rpcenv, &userid, password.as_deref(), false).await?;
+    }
+
     let _lock = pbs_config::user::lock_config()?;
 
     let (mut config, expected_digest) = pbs_config::user::config()?;
@@ -381,28 +385,16 @@ pub fn delete_user(userid: Userid, digest: Option<String>) -> Result<(), Error> 
     pbs_config::user::save_config(&config)?;
 
     let authenticator = crate::auth::lookup_authenticator(userid.realm())?;
-    match authenticator.remove_password(userid.name()) {
-        Ok(()) => {}
-        Err(err) => {
-            eprintln!(
-                "error removing password after deleting user {:?}: {}",
-                userid, err
-            );
-        }
+    if let Err(err) = authenticator.remove_password(userid.name()) {
+        eprintln!("error removing password after deleting user {userid:?}: {err}",);
     }
 
-    match crate::config::tfa::read().and_then(|mut cfg| {
+    if let Err(err) = crate::config::tfa::read().and_then(|mut cfg| {
         let _: proxmox_tfa::api::NeedsSaving =
             cfg.remove_user(&crate::config::tfa::UserAccess, userid.as_str())?;
         crate::config::tfa::write(&cfg)
     }) {
-        Ok(()) => (),
-        Err(err) => {
-            eprintln!(
-                "error updating TFA config after deleting user {:?}: {}",
-                userid, err
-            );
-        }
+        eprintln!("error updating TFA config after deleting user {userid:?} {err}",);
     }
 
     Ok(())

@@ -8,6 +8,15 @@ Ext.define('PBS.TapeManagement.TapeBackupWindow', {
     showTaskViewer: true,
     isCreate: true,
 
+    viewModel: {
+	data: {
+	    notificationMode: 'notification-system',
+	},
+	formulas: {
+	    notificationSystemSelected: (get) => get('notificationMode') === 'notification-system',
+	},
+    },
+
     items: [
 	{
 	    xtype: 'inputpanel',
@@ -39,6 +48,7 @@ Ext.define('PBS.TapeManagement.TapeBackupWindow', {
 		    fieldLabel: gettext('Max Depth'),
 		    disabled: true,
 		    name: 'max-depth',
+		    deleteEmpty: false,
 		},
 		{
 		    xtype: 'pbsMediaPoolSelector',
@@ -82,6 +92,19 @@ Ext.define('PBS.TapeManagement.TapeBackupWindow', {
 		    fieldLabel: gettext('Eject Media'),
 		},
 		{
+		    xtype: 'proxmoxKVComboBox',
+		    labelWidth: 150,
+		    comboItems: [
+			['legacy-sendmail', gettext('Email (legacy)')],
+			['notification-system', gettext('Notification system')],
+		    ],
+		    fieldLabel: gettext('Notification mode'),
+		    name: 'notification-mode',
+		    bind: {
+			value: '{notificationMode}',
+		    },
+		},
+		{
 		    xtype: 'pmxUserSelector',
 		    labelWidth: 150,
 		    name: 'notify-user',
@@ -90,6 +113,9 @@ Ext.define('PBS.TapeManagement.TapeBackupWindow', {
 		    value: null,
 		    allowBlank: true,
 		    skipEmptyText: true,
+		    bind: {
+			disabled: "{notificationSystemSelected}",
+		    },
 		    renderer: Ext.String.htmlEncode,
 		},
 	    ],

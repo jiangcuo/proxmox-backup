@@ -21,6 +21,7 @@ TAPE_UI_FILES=						\
 	tape/window/Erase.js				\
 	tape/window/EncryptionEdit.js			\
 	tape/window/LabelMedia.js			\
+	tape/window/MediaRemoveWindow.js		\
 	tape/window/PoolEdit.js				\
 	tape/window/TapeBackup.js			\
 	tape/window/TapeBackupJob.js			\
@@ -62,10 +63,13 @@ JSSRC=							\
 	config/SyncView.js				\
 	config/VerifyView.js				\
 	config/PruneView.js				\
+	config/GCView.js				\
 	config/WebauthnView.js				\
 	config/CertificateView.js			\
 	config/NodeOptionView.js			\
 	config/MetricServerView.js			\
+	config/NotificationConfigView.js		\
+	config/PruneAndGC.js				\
 	window/ACLEdit.js				\
 	window/BackupGroupChangeOwner.js		\
 	window/CreateDirectory.js			\
@@ -73,13 +77,14 @@ JSSRC=							\
 	window/NamespaceEdit.js				\
 	window/MaintenanceOptions.js			\
 	window/NotesEdit.js				\
+	window/NotificationMatcherOverride.js		\
 	window/RemoteEdit.js				\
 	window/TrafficControlEdit.js			\
 	window/NotifyOptions.js				\
 	window/SyncJobEdit.js				\
 	window/PruneJobEdit.js				\
+	window/GCJobEdit.js				\
 	window/UserEdit.js				\
-	window/UserPassword.js				\
 	window/Settings.js				\
 	window/TokenEdit.js				\
 	window/VerifyJobEdit.js				\
@@ -104,7 +109,6 @@ JSSRC=							\
 	Subscription.js					\
 	datastore/Summary.js				\
 	datastore/Notes.js				\
-	datastore/PruneAndGC.js				\
 	datastore/Prune.js				\
 	datastore/Content.js				\
 	datastore/OptionView.js				\

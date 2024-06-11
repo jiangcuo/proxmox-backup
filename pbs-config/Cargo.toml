@@ -7,7 +7,7 @@ description = "Configuration file management for PBS"
 
 [dependencies]
 anyhow.workspace = true
-hex.workspace = true
+const_format.workspace = true
 lazy_static.workspace = true
 libc.workspace = true
 nix.workspace = true
@@ -17,6 +17,7 @@ regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+proxmox-notify.workspace = true
 proxmox-router = { workspace = true, default-features = false }
 proxmox-schema.workspace = true
 proxmox-section-config.workspace = true

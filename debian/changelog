@@ -1,3 +1,284 @@
+rust-proxmox-backup (3.2.4-1) bookworm; urgency=medium
+
+  * fix: network api: permission using wrong pathname
+
+  * fix #5503: d/control: bump dependency for proxmox-widget-toolkit
+
+  * auth: add locking to `PbsAuthenticator` to avoid race conditions
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 05 Jun 2024 16:23:38 +0200
+
+rust-proxmox-backup (3.2.3-1) bookworm; urgency=medium
+
+  * api-types: remove influxdb bucket name restrictions
+
+  * api: datastore status: delay lookup after permission check to improve
+    consistency of tracked read operations
+
+  * tape: improve throughput by not unnecessarily syncing/committing after
+    every archive written beyond the first 128 GiB
+
+  * tape: save 'bytes used' in the tape inventory and show them on the web UI
+    to allow users to more easily see the usage of a tape
+
+  * tape drive status: return drive activity (like cleaning, loading,
+    unloading, writing, ...) in the API and show them in the UI
+
+  * ui: tape drive status: avoid checking some specific status if the current
+    drive activity would block doing so anyway
+
+  * tape: write out basic MAM host-type attributes to media to make them more
+    easily identifiable as Proxmox Backup Server tape by common LTO tooling.
+
+  * api: syslog: fix the documented type of the return value
+
+  * fix #5465: restore daemon: mount NTFS with UTF-8 charset
+
+  * restore daemon: log some more errors on directory traversal
+
+  * fix #5422: ui: garbage-collection: make columns in global view sortable
+
+  * auth: move to hmac keys for csrf tokens as future-proofing
+
+  * auth: upgrade hashes on user log in if a users password is not hashed with
+    the latest password hashing function for hardening purpose
+
+  * auth: use ed25519 keys when generating new auth api keys
+
+  * notifications: fix legacy sync notifications
+
+  * docs: document notification-mode and merge old notification section
+
+  * docs: notifications: rewrite overview for more clarity
+
+  * ui: datastore options: link to 'notification-mode' section
+
+  * acme: explicitly print a query when prompting for the custom directory URI
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 22 May 2024 19:31:35 +0200
+
+rust-proxmox-backup (3.2.2-1) bookworm; urgency=medium
+
+  * ui: notifications fix empty text format for the default mail author
+
+  * ui: tape backup: do not try to delete the namespace property if its empty
+
+  * ui: sync job: fix error if local namespace is selected first
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 25 Apr 2024 12:06:04 +0200
+
+rust-proxmox-backup (3.2.1-1) bookworm; urgency=medium
+
+  * implement Active Directory support:
+    - api: access: add routes for managing AD realms
+    - config: domains: add new "ad" section type for AD realms
+    - realm sync: add sync job for AD realms
+    - manager cli: add sub-command for managing AD realms
+    - docs: user-management: add section about AD realm support
+
+  * auth: fix requesting the TFA write lock exclusively
+
+  * installation: add section about unattended/automatic installation
+
+  * api: tape config: forbid reusing IDs between tape changer and tape drive
+
+  * api: add support for creating and updating VLAN interfaces
+
+  * ui: enable the VLAN widget that got moved over from PVE to the generic
+    widget-toolkit
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 24 Apr 2024 22:05:36 +0200
+
+rust-proxmox-backup (3.2.0-1) bookworm; urgency=medium
+
+  * fix #5248: client: allow self-signed/untrusted certificate chains
+
+  * api: make prune-group a real worker task to avoid timeouts after 30s
+
+  * ui: sync view: rename column 'Max. Recursion' -> 'Max. Depth'
+
+  * api: assert that maintenance mode transitions are valid, e.g., do
+    not allow clearing the special "delete" maitenance mode
+
+  * fix #3217: ui: add global prune and GC job view for an overview over
+    all datastores
+
+  * fix #4723: manager: add new "garbage-collection list" CLI command to
+    list all GC jobs
+
+  * ui: garbage collection: show removed and pending data of last run in
+    bytes
+
+  * fix #5251: login: set autocomplete on password and user
+
+  * allow sending notifications via advanced proxmox-notify crate
+
+  * api: add endpoints for querying known notification values/fields
+
+  * api: add endpoints for gotify, smtp, and sendmail targets
+
+  * api: add endpoints for managing notification matchers
+
+  * api: add endpoints for querying/testing notification targets
+
+  * server: notifications:
+    - send tape notifications via notification system
+    - send ACME notifications via notification system
+    - send update notifications via notification system
+    - send sync notifications via notification system
+    - send verify notifications via notification system
+    - send prune notifications via notification system
+    - send GC notifications via notification system
+
+  * docs: add documentation for notification system
+
+  * ui: notifications: pull in UX improvements for match rules creation
+
+  * api: notification: also list datastores if user has only Backup
+    privs
+
+  * manager: add CLI commands for SMTP, sendmail, and gotify
+    endpoints
+
+  * manager: add CLI for administrating notification matchers and targets
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 23 Apr 2024 23:45:29 +0200
+
+rust-proxmox-backup (3.1.5-1) bookworm; urgency=medium
+
+  * fix #5190: api: OIDC: accept generic URIs for the ACR value
+
+  * fix #5229: tape: remove max sequence number limit
+
+  * client: add "delete-groups" option to allow one to delete all groups in a
+    hierarchy, which allows removing non-empty namespaces
+
+  * fix #4975: client: add option to ignore E2BIG error flag when restoring,
+    to workaround the interface limitation of the kernel where on some file
+    systems can have a bigger extended attribute (xattr) as the kernel
+    supports reading. This can happen due to the file system having been
+    accessed by another OS version or even an entirely different OS type.
+
+  * docs: clarify prune settings slightly more
+
+  * ui: trim whitespaces when adding a subscription key
+
+  * ui: system config: fix deleting DNS entries
+
+  * fix #5217: api: send missing header when upgrading to HTTP/2 to improve
+    support with reverse proxies like caddy
+
+  * docs: lto barcod generator: disable add button when fields are not valid
+
+  * docs: lto barcode generator: add LTO-9 and WORM types
+
+  * ui: adapt to the API enforcing the not accepting any additional parameters
+    if a API endpoint does not explicitly state that it needs that behavior:
+    - metrics: avoid trying to load existing config, fixes case where a
+      wrong digest was send along, failing the creation of the metrics host
+      entry
+    - avoid sending a 'delete' parameter on create for tape backup jobs, prune
+      settings, sync jobs, verify jobs
+    - user edit: don't send realm property
+
+  * server: sync job: return `PullStats` for pull related methods
+
+  * fix #5285: api: sync job: add job summary to task log
+
+  * ui: tape: transfer: increase timeout to 3 minutes
+
+  * add 'confirmation-password' parameter to user password change API/UI
+
+  * remove datastore from internal cache based on maintenance mode to avoid
+    that a lock file is kept open. With that lock-file closed one can use a
+    offline maintenance mode to cleanly unmount the mount point where such a
+    datastore resides.
+
+  * docs: clarify difference between zfs cache and log
+
+  * fix #5188: gui: add copy to clipboard on snapshots
+
+  * api: sync job: log stats for removed vanished entities
+
+  * docs: add examples for --exclude parameter
+
+  * ui: prune job: disallow setting blank schedule
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 25 Mar 2024 16:52:03 +0100
+
+rust-proxmox-backup (3.1.4-1) bookworm; urgency=medium
+
+  * api: acme: skip serializing empty 'api' and 'data' option
+
+  * tape: fix regression in restoring an encryption key from medium, avoid
+    trying to load the key to the drive, which cannot work in this special
+    case.
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 01 Feb 2024 16:30:18 +0100
+
+rust-proxmox-backup (3.1.3-1) bookworm; urgency=medium
+
+  * improve efficiency of detecting if a block device is a partition
+
+  * acme: api: add option for external account binding to account registration
+    endpoint
+
+  * ui: datastore summary handle non-existent 'avail' and 'used' status values
+
+  * tape: allow configuring the time out for "wait until ready" to better cope
+    with the long initialization duration that happens on the first use of
+    LTO 9+ tapes
+
+  * tape: improve error on decode element status page
+
+  * tape: improve LTO 9 compatibility
+
+  * fix #4904: tape changer: add option to explicitly eject the tape before
+    unloading it
+
+  * docs: tape: replace use of 'export-media' with correct 'export-media-set'
+    option
+
+  * docs: tape: add LTO 9 considerations
+
+  * fix #5117: ui: node info: avoid invalid array access for certain foreign
+    kernels
+
+  * d/control: explicitly depend on gdisk package to ensure it's available
+    when installing on top of a plain Debian installation
+
+  * tape: work around buggy changer implementations when reading the element
+    status
+
+  * system report: include prune.cfg
+
+  * fix #4315: jobs: modify group filter so include/exclude is tracked
+
+  * ui: show if Filter includes or excludes
+
+  * datastore: add additional context for a parsing error when getting the
+    owner of a backup group
+
+  * api: tape: optionally accept uuid for destroying or moving a media, so
+    that one can uniquely identify existing tapes with duplicate labels.
+
+  * api: tape: don't allow duplicate media label-texts anymore
+
+  * ui: tape inventory: use uuid as id
+
+  * ui: tape: add button to remove a medium from the inventory, while not
+    touching the data
+
+  * api: custom certificate upload: make key optional and use the existing
+    key, if it's not specified.
+
+  * close #4819: ui: allow usernames shorter than 4 characters
+
+  * tape: rework on-drive encryption key handling and ensure this key does not
+    gets unloaded to early
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 22 Jan 2024 15:20:45 +0100
+
 rust-proxmox-backup (3.1.2-1) bookworm; urgency=medium
 
   * sync: fix recent regression with recursive remote sync

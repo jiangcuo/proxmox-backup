@@ -2,6 +2,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use anyhow::{bail, format_err, Error};
+use const_format::concatcp;
 use serde::{Deserialize, Serialize};
 
 use proxmox_schema::{
@@ -10,31 +11,33 @@ use proxmox_schema::{
 };
 
 use crate::{
-    Authid, CryptMode, Fingerprint, MaintenanceMode, Userid, DATASTORE_NOTIFY_STRING_SCHEMA,
-    GC_SCHEDULE_SCHEMA, PROXMOX_SAFE_ID_FORMAT, PRUNE_SCHEDULE_SCHEMA, SHA256_HEX_REGEX,
-    SINGLE_LINE_COMMENT_SCHEMA, UPID,
+    Authid, CryptMode, Fingerprint, GroupFilter, MaintenanceMode, MaintenanceType, Userid,
+    BACKUP_ID_RE, BACKUP_NS_RE, BACKUP_TIME_RE, BACKUP_TYPE_RE, DATASTORE_NOTIFY_STRING_SCHEMA,
+    GC_SCHEDULE_SCHEMA, GROUP_OR_SNAPSHOT_PATH_REGEX_STR, PROXMOX_SAFE_ID_FORMAT,
+    PROXMOX_SAFE_ID_REGEX_STR, PRUNE_SCHEDULE_SCHEMA, SHA256_HEX_REGEX, SINGLE_LINE_COMMENT_SCHEMA,
+    SNAPSHOT_PATH_REGEX_STR, UPID,
 };
 
 const_regex! {
-    pub BACKUP_NAMESPACE_REGEX = concat!(r"^", BACKUP_NS_RE!(), r"$");
+    pub BACKUP_NAMESPACE_REGEX = concatcp!(r"^", BACKUP_NS_RE, r"$");
 
-    pub BACKUP_TYPE_REGEX = concat!(r"^(", BACKUP_TYPE_RE!(), r")$");
+    pub BACKUP_TYPE_REGEX = concatcp!(r"^(", BACKUP_TYPE_RE, r")$");
 
-    pub BACKUP_ID_REGEX = concat!(r"^", BACKUP_ID_RE!(), r"$");
+    pub BACKUP_ID_REGEX = concatcp!(r"^", BACKUP_ID_RE, r"$");
 
-    pub BACKUP_DATE_REGEX = concat!(r"^", BACKUP_TIME_RE!() ,r"$");
+    pub BACKUP_DATE_REGEX = concatcp!(r"^", BACKUP_TIME_RE ,r"$");
 
-    pub GROUP_PATH_REGEX = concat!(
-        r"^(", BACKUP_TYPE_RE!(), ")/",
-        r"(", BACKUP_ID_RE!(), r")$",
+    pub GROUP_PATH_REGEX = concatcp!(
+        r"^(", BACKUP_TYPE_RE, ")/",
+        r"(", BACKUP_ID_RE, r")$",
     );
 
     pub BACKUP_FILE_REGEX = r"^.*\.([fd]idx|blob)$";
 
-    pub SNAPSHOT_PATH_REGEX = concat!(r"^", SNAPSHOT_PATH_REGEX_STR!(), r"$");
-    pub GROUP_OR_SNAPSHOT_PATH_REGEX = concat!(r"^", GROUP_OR_SNAPSHOT_PATH_REGEX_STR!(), r"$");
+    pub SNAPSHOT_PATH_REGEX = concatcp!(r"^", SNAPSHOT_PATH_REGEX_STR, r"$");
+    pub GROUP_OR_SNAPSHOT_PATH_REGEX = concatcp!(r"^", GROUP_OR_SNAPSHOT_PATH_REGEX_STR, r"$");
 
-    pub DATASTORE_MAP_REGEX = concat!(r"^(?:", PROXMOX_SAFE_ID_REGEX_STR!(), r"=)?", PROXMOX_SAFE_ID_REGEX_STR!(), r"$");
+    pub DATASTORE_MAP_REGEX = concatcp!(r"^(?:", PROXMOX_SAFE_ID_REGEX_STR, r"=)?", PROXMOX_SAFE_ID_REGEX_STR, r"$");
 }
 
 pub const CHUNK_DIGEST_FORMAT: ApiStringFormat = ApiStringFormat::Pattern(&SHA256_HEX_REGEX);
@@ -306,6 +309,10 @@ pub struct DataStoreConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notify: Option<String>,
 
+    /// Opt in to the new notification system
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notification_mode: Option<NotificationMode>,
+
     /// Datastore tuning options
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tuning: Option<String>,
@@ -313,6 +320,23 @@ pub struct DataStoreConfig {
     /// Maintenance mode, type is either 'offline' or 'read-only', message should be enclosed in "
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maintenance_mode: Option<String>,
+}
+
+#[api]
+#[derive(Serialize, Deserialize, Updater, Clone, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+/// Configure how notifications for this datastore should be sent.
+/// `legacy-sendmail` sends email notifications to the user configured
+/// in `notify-user` via the system's `sendmail` executable.
+/// `notification-system` emits matchable notification events to the
+/// notification system.
+pub enum NotificationMode {
+    /// Send notifications via the system's sendmail command to the user
+    /// configured in `notify-user`
+    #[default]
+    LegacySendmail,
+    /// Emit notification events to the notification system
+    NotificationSystem,
 }
 
 impl DataStoreConfig {
@@ -327,16 +351,51 @@ impl DataStoreConfig {
             verify_new: None,
             notify_user: None,
             notify: None,
+            notification_mode: None,
             tuning: None,
             maintenance_mode: None,
         }
     }
 
     pub fn get_maintenance_mode(&self) -> Option<MaintenanceMode> {
-        self.maintenance_mode
-            .as_ref()
-            .and_then(|str| MaintenanceMode::API_SCHEMA.parse_property_string(str).ok())
-            .and_then(|value| MaintenanceMode::deserialize(value).ok())
+        self.maintenance_mode.as_ref().and_then(|str| {
+            MaintenanceMode::deserialize(proxmox_schema::de::SchemaDeserializer::new(
+                str,
+                &MaintenanceMode::API_SCHEMA,
+            ))
+            .ok()
+        })
+    }
+
+    pub fn set_maintenance_mode(&mut self, new_mode: Option<MaintenanceMode>) -> Result<(), Error> {
+        let current_type = self.get_maintenance_mode().map(|mode| mode.ty);
+        let new_type = new_mode.as_ref().map(|mode| mode.ty);
+
+        match current_type {
+            Some(MaintenanceType::ReadOnly) => { /* always OK  */ }
+            Some(MaintenanceType::Offline) => { /* always OK  */ }
+            Some(MaintenanceType::Delete) => {
+                match new_type {
+                    Some(MaintenanceType::Delete) => { /* allow to delete a deleted storage */ }
+                    _ => {
+                        bail!("datastore is being deleted")
+                    }
+                }
+            }
+            None => { /* always OK  */ }
+        }
+
+        let new_mode = match new_mode {
+            Some(new_mode) => Some(
+                proxmox_schema::property_string::PropertyString::new(new_mode)
+                    .to_property_string()?,
+            ),
+            None => None,
+        };
+
+        self.maintenance_mode = new_mode;
+
+        Ok(())
     }
 }
 
@@ -843,18 +902,36 @@ impl BackupGroup {
     }
 
     pub fn matches(&self, filter: &crate::GroupFilter) -> bool {
-        use crate::GroupFilter;
-
-        match filter {
-            GroupFilter::Group(backup_group) => {
+        use crate::FilterType;
+        match &filter.filter_type {
+            FilterType::Group(backup_group) => {
                 match backup_group.parse::<BackupGroup>() {
                     Ok(group) => *self == group,
                     Err(_) => false, // shouldn't happen if value is schema-checked
                 }
             }
-            GroupFilter::BackupType(ty) => self.ty == *ty,
-            GroupFilter::Regex(regex) => regex.is_match(&self.to_string()),
+            FilterType::BackupType(ty) => self.ty == *ty,
+            FilterType::Regex(regex) => regex.is_match(&self.to_string()),
         }
+    }
+
+    pub fn apply_filters(&self, filters: &[GroupFilter]) -> bool {
+        // since there will only be view filter in the list, an extra iteration to get the umber of
+        // include filter should not be an issue
+        let is_included = if filters.iter().filter(|f| !f.is_exclude).count() == 0 {
+            true
+        } else {
+            filters
+                .iter()
+                .filter(|f| !f.is_exclude)
+                .any(|filter| self.matches(filter))
+        };
+
+        is_included
+            && !filters
+                .iter()
+                .filter(|f| f.is_exclude)
+                .any(|filter| self.matches(filter))
     }
 }
 
@@ -1225,7 +1302,7 @@ pub struct TypeCounts {
         },
     },
 )]
-#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 /// Garbage collection status.
 pub struct GarbageCollectionStatus {
@@ -1250,6 +1327,38 @@ pub struct GarbageCollectionStatus {
     pub removed_bad: usize,
     /// Number of chunks still marked as .bad after garbage collection.
     pub still_bad: usize,
+}
+
+#[api(
+    properties: {
+        "status": {
+            type: GarbageCollectionStatus,
+        },
+    }
+)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+/// Garbage Collection general info
+pub struct GarbageCollectionJobStatus {
+    /// Datastore
+    pub store: String,
+    #[serde(flatten)]
+    pub status: GarbageCollectionStatus,
+    /// Schedule of the gc job
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    /// Time of the next gc run
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_run: Option<i64>,
+    /// Endtime of the last gc run
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_endtime: Option<i64>,
+    /// State of the last gc run
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_state: Option<String>,
+    /// Duration of last gc run
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<i64>,
 }
 
 #[api(

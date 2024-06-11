@@ -8,21 +8,10 @@ use proxmox_io::{ReadExt, WriteExt};
 
 use crate::sgutils2::{alloc_page_aligned_buffer, SgRaw};
 
-/// Test if drive supports hardware encryption
-///
-/// We search for AES_GCM algorithm with 256bits key.
-pub fn has_encryption<F: AsRawFd>(file: &mut F) -> bool {
-    let data = match sg_spin_data_encryption_caps(file) {
-        Ok(data) => data,
-        Err(_) => return false,
-    };
-    decode_spin_data_encryption_caps(&data).is_ok()
-}
-
 /// Set or clear encryption key
 ///
 /// We always use mixed mode,
-pub fn set_encryption<F: AsRawFd>(file: &mut F, key: Option<[u8; 32]>) -> Result<(), Error> {
+pub fn drive_set_encryption<F: AsRawFd>(file: &mut F, key: Option<[u8; 32]>) -> Result<(), Error> {
     let data = match sg_spin_data_encryption_caps(file) {
         Ok(data) => data,
         Err(_) if key.is_none() => {
@@ -55,6 +44,27 @@ pub fn set_encryption<F: AsRawFd>(file: &mut F, key: Option<[u8; 32]>) -> Result
     }
 
     bail!("got unexpected encryption mode {:?}", status.mode);
+}
+
+/// Returns if encryption is enabled on the drive
+pub fn drive_get_encryption<F: AsRawFd>(file: &mut F) -> Result<bool, Error> {
+    let data = match sg_spin_data_encryption_status(file) {
+        Ok(data) => data,
+        Err(_) => {
+            // Assume device does not support HW encryption
+            return Ok(false);
+        }
+    };
+    let status = decode_spin_data_encryption_status(&data)?;
+    match status.mode {
+        // these three below have all encryption enabled, and only differ in how decryption is
+        // handled
+        DataEncryptionMode::On => Ok(true),
+        DataEncryptionMode::Mixed => Ok(true),
+        DataEncryptionMode::RawRead => Ok(true),
+        // currently, the mode below is the only one that has encryption actually disabled
+        DataEncryptionMode::Off => Ok(false),
+    }
 }
 
 #[derive(Endian)]
@@ -187,7 +197,7 @@ fn sg_spin_data_encryption_caps<F: AsRawFd>(file: &mut F) -> Result<Vec<u8>, Err
         .map(|v| v.to_vec())
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum DataEncryptionMode {
     On,
     Mixed,

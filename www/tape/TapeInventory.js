@@ -16,8 +16,9 @@ Ext.define('pbs-model-tapes', {
 	'seq-nr',
 	'status',
 	'uuid',
+	'bytes-used',
     ],
-    idProperty: 'label-text',
+    idProperty: 'uuid',
     proxy: {
 	type: 'proxmox',
 	url: '/api2/json/tape/media/list',
@@ -58,6 +59,27 @@ Ext.define('PBS.TapeManagement.TapeInventory', {
 		    },
 		},
 	    }).show();
+	},
+
+	remove: function() {
+	    let me = this;
+	    let view = me.getView();
+	    let selection = view.getSelection();
+	    if (!selection || selection.length < 1) {
+		return;
+	    }
+	    let uuid = selection[0].data.uuid;
+	    let label = selection[0].data['label-text'];
+	    Ext.create('PBS.TapeManagement.MediaRemoveWindow', {
+		uuid,
+		label,
+		autoShow: true,
+		listeners: {
+		    destroy: function() {
+			me.reload();
+		    },
+		},
+	    });
 	},
 
 	moveToVault: function() {
@@ -206,6 +228,12 @@ Ext.define('PBS.TapeManagement.TapeInventory', {
 	    disabled: true,
 	    handler: 'format',
 	},
+	{
+	    xtype: 'proxmoxButton',
+	    text: gettext('Remove'),
+	    disabled: true,
+	    handler: 'remove',
+	},
     ],
 
     features: [
@@ -292,6 +320,18 @@ Ext.define('PBS.TapeManagement.TapeInventory', {
 		return record.data.expired ? 'expired' : value;
 	    },
 	    flex: 1,
+	},
+	{
+	    text: 'UUID',
+	    dataIndex: 'uuid',
+	    flex: 1,
+	    hidden: true,
+	},
+	{
+	    text: gettext("Bytes Used"),
+	    dataIndex: 'bytes-used',
+	    flex: 1,
+	    renderer: Proxmox.Utils.render_size,
 	},
     ],
 });

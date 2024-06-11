@@ -42,6 +42,7 @@ fn files() -> Vec<(&'static str, Vec<&'static str>)> {
             "Jobs",
             vec![
                 "/etc/proxmox-backup/sync.cfg",
+                "/etc/proxmox-backup/prune.cfg",
                 "/etc/proxmox-backup/verification.cfg",
             ],
         ),
@@ -103,7 +104,7 @@ fn function_calls() -> Vec<FunctionMapping> {
             for store in config.sections.keys() {
                 list.push(store.as_str());
             }
-            list.join(", ")
+            format!("```\n{}\n```", list.join(", "))
         }),
         ("System Load & Uptime", get_top_processes),
     ]
@@ -125,9 +126,8 @@ fn get_directory_content(path: impl AsRef<Path>) -> String {
         Ok(iter) => iter,
         Err(err) => {
             return format!(
-                "`$ cat '{}*'`\n```\n# read dir failed - {}\n```",
+                "`$ cat '{}*'`\n```\n# read dir failed - {err}\n```",
                 path.as_ref().display(),
-                err.to_string(),
             );
         }
     };
@@ -137,7 +137,7 @@ fn get_directory_content(path: impl AsRef<Path>) -> String {
         let entry = match entry {
             Ok(entry) => entry,
             Err(err) => {
-                let _ = writeln!(out, "error during read-dir - {}", err.to_string());
+                let _ = writeln!(out, "error during read-dir - {err}");
                 continue;
             }
         };
@@ -189,7 +189,7 @@ pub fn generate_report() -> String {
                 .map(|file_name| {
                     let path = Path::new(file_name);
                     if path.is_dir() {
-                        get_directory_content(&path)
+                        get_directory_content(path)
                     } else {
                         get_file_content(file_name)
                     }
@@ -212,7 +212,7 @@ pub fn generate_report() -> String {
         .iter()
         .map(|(desc, function)| {
             let output = function();
-            format!("#### {desc}\n```\n{}\n```", output.trim_end())
+            format!("#### {desc}\n{}\n", output.trim_end())
         })
         .collect::<Vec<String>>()
         .join("\n\n");

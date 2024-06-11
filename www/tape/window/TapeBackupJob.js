@@ -46,6 +46,23 @@ Ext.define('PBS.TapeManagement.BackupJobEdit', {
 	},
     },
 
+    viewModel: {
+	data: {
+	    notificationMode: '__default__',
+	},
+	formulas: {
+	    notificationSystemSelected: (get) => get('notificationMode') === 'notification-system',
+	},
+    },
+
+    initComponent: function() {
+	let me = this;
+	// Automatically select the new system for new jobs
+	let mode = me.isCreate ? "notification-system" : "__default__";
+	me.getViewModel().set('notificationMode', mode);
+	me.callParent();
+    },
+
     items: {
 	xtype: 'tabpanel',
 	bodyPadding: 10,
@@ -61,7 +78,15 @@ Ext.define('PBS.TapeManagement.BackupJobEdit', {
 			Proxmox.Utils.assemble_field_data(values, { "delete": 'eject-media' });
 		    }
 		    PBS.Utils.delete_if_default(values, 'notify-user');
+
+		    if (me.isCreate) {
+			delete values.delete;
+		    }
+
 		    return values;
+		},
+		cbind: {
+		    isCreate: '{isCreate}', // pass it through
 		},
 		column1: [
 		    {
@@ -102,6 +127,19 @@ Ext.define('PBS.TapeManagement.BackupJobEdit', {
 			name: 'drive',
 		    },
 		    {
+			xtype: 'proxmoxKVComboBox',
+			comboItems: [
+			    ['__default__', `${Proxmox.Utils.defaultText}  (Email)`],
+			    ['legacy-sendmail', gettext('Email (legacy)')],
+			    ['notification-system', gettext('Notification system')],
+			],
+			fieldLabel: gettext('Notification mode'),
+			name: 'notification-mode',
+			bind: {
+			    value: '{notificationMode}',
+			},
+		    },
+		    {
 			xtype: 'pmxUserSelector',
 			name: 'notify-user',
 			fieldLabel: gettext('Notify User'),
@@ -109,6 +147,9 @@ Ext.define('PBS.TapeManagement.BackupJobEdit', {
 			allowBlank: true,
 			value: null,
 			renderer: Ext.String.htmlEncode,
+			bind: {
+			    disabled: "{notificationSystemSelected}",
+			},
 		    },
 		],
 
@@ -184,7 +225,13 @@ Ext.define('PBS.TapeManagement.BackupJobEdit', {
 			delete values['group-filter'];
 			values.delete = 'group-filter';
 		    }
+		    if (this.isCreate) {
+			delete values.delete;
+		    }
 		    return values;
+		},
+		cbind: {
+		    isCreate: '{isCreate}', // pass it through
 		},
 		title: gettext('Group Filter'),
 		items: [

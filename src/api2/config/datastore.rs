@@ -13,7 +13,7 @@ use proxmox_uuid::Uuid;
 
 use pbs_api_types::{
     Authid, DataStoreConfig, DataStoreConfigUpdater, DatastoreNotify, DatastoreTuning, KeepOptions,
-    PruneJobConfig, PruneJobOptions, DATASTORE_SCHEMA, PRIV_DATASTORE_ALLOCATE,
+    MaintenanceMode, PruneJobConfig, PruneJobOptions, DATASTORE_SCHEMA, PRIV_DATASTORE_ALLOCATE,
     PRIV_DATASTORE_AUDIT, PRIV_DATASTORE_MODIFY, PROXMOX_CONFIG_DIGEST_SCHEMA, UPID_SCHEMA,
 };
 use pbs_config::BackupLockGuard;
@@ -222,6 +222,8 @@ pub enum DeletableProperty {
     NotifyUser,
     /// Delete the notify property
     Notify,
+    /// Delete the notification-mode property
+    NotificationMode,
     /// Delete the tuning property
     Tuning,
     /// Delete the maintenance-mode property
@@ -315,11 +317,14 @@ pub fn update_datastore(
                 DeletableProperty::NotifyUser => {
                     data.notify_user = None;
                 }
+                DeletableProperty::NotificationMode => {
+                    data.notification_mode = None;
+                }
                 DeletableProperty::Tuning => {
                     data.tuning = None;
                 }
                 DeletableProperty::MaintenanceMode => {
-                    data.maintenance_mode = None;
+                    data.set_maintenance_mode(None)?;
                 }
             }
         }
@@ -385,12 +390,25 @@ pub fn update_datastore(
         data.notify_user = update.notify_user;
     }
 
+    if update.notification_mode.is_some() {
+        data.notification_mode = update.notification_mode;
+    }
+
     if update.tuning.is_some() {
         data.tuning = update.tuning;
     }
 
+    let mut maintenance_mode_changed = false;
     if update.maintenance_mode.is_some() {
-        data.maintenance_mode = update.maintenance_mode;
+        maintenance_mode_changed = data.maintenance_mode != update.maintenance_mode;
+
+        let maintenance_mode = match update.maintenance_mode {
+            Some(mode_str) => Some(MaintenanceMode::deserialize(
+                proxmox_schema::de::SchemaDeserializer::new(mode_str, &MaintenanceMode::API_SCHEMA),
+            )?),
+            None => None,
+        };
+        data.set_maintenance_mode(maintenance_mode)?;
     }
 
     config.set_data(&name, "datastore", &data)?;
@@ -401,6 +419,25 @@ pub fn update_datastore(
     // (e.g. going from monthly to weekly in the second week of the month)
     if gc_schedule_changed {
         jobstate::update_job_last_run_time("garbage_collection", &name)?;
+    }
+
+    // tell the proxy it might have to clear a cache entry
+    if maintenance_mode_changed {
+        tokio::spawn(async move {
+            if let Ok(proxy_pid) =
+                proxmox_rest_server::read_pid(pbs_buildcfg::PROXMOX_BACKUP_PROXY_PID_FN)
+            {
+                let sock = proxmox_rest_server::ctrl_sock_from_pid(proxy_pid);
+                let _ = proxmox_rest_server::send_raw_command(
+                    sock,
+                    &format!(
+                        "{{\"command\":\"update-datastore-cache\",\"args\":\"{}\"}}\n",
+                        &name
+                    ),
+                )
+                .await;
+            }
+        });
     }
 
     Ok(())

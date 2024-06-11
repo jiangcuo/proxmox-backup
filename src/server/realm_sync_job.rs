@@ -10,9 +10,9 @@ use proxmox_sys::{task_log, task_warn};
 use std::{collections::HashSet, sync::Arc};
 
 use pbs_api_types::{
-    ApiToken, Authid, LdapRealmConfig, Realm, RemoveVanished, SyncAttributes as LdapSyncAttributes,
-    SyncDefaultsOptions, User, Userid, EMAIL_SCHEMA, FIRST_NAME_SCHEMA, LAST_NAME_SCHEMA,
-    REMOVE_VANISHED_ARRAY, USER_CLASSES_ARRAY,
+    AdRealmConfig, ApiToken, Authid, LdapRealmConfig, Realm, RealmType, RemoveVanished,
+    SyncAttributes as LdapSyncAttributes, SyncDefaultsOptions, User, Userid, EMAIL_SCHEMA,
+    FIRST_NAME_SCHEMA, LAST_NAME_SCHEMA, REMOVE_VANISHED_ARRAY, USER_CLASSES_ARRAY,
 };
 
 use crate::{auth, server::jobstate::Job};
@@ -22,6 +22,7 @@ use crate::{auth, server::jobstate::Job};
 pub fn do_realm_sync_job(
     mut job: Job,
     realm: Realm,
+    realm_type: RealmType,
     auth_id: &Authid,
     _schedule: Option<String>,
     to_stdout: bool,
@@ -46,13 +47,69 @@ pub fn do_realm_sync_job(
             };
 
             async move {
-                let sync_job = LdapRealmSyncJob::new(worker, realm, &override_settings, dry_run)?;
-                sync_job.sync().await
+                match realm_type {
+                    RealmType::Ldap => {
+                        LdapRealmSyncJob::new(worker, realm, &override_settings, dry_run)?
+                            .sync()
+                            .await
+                    }
+                    RealmType::Ad => {
+                        AdRealmSyncJob::new(worker, realm, &override_settings, dry_run)?
+                            .sync()
+                            .await
+                    }
+                    _ => bail!("cannot sync realm {realm} of type {realm_type}"),
+                }
             }
         },
     )?;
 
     Ok(upid_str)
+}
+
+/// Implementation for syncing Active Directory realms. Merely a thin wrapper over
+/// `LdapRealmSyncJob`, as AD is just LDAP with some special requirements.
+struct AdRealmSyncJob(LdapRealmSyncJob);
+
+impl AdRealmSyncJob {
+    fn new(
+        worker: Arc<WorkerTask>,
+        realm: Realm,
+        override_settings: &GeneralSyncSettingsOverride,
+        dry_run: bool,
+    ) -> Result<Self, Error> {
+        let (domains, _digest) = pbs_config::domains::config()?;
+        let config = if let Ok(config) = domains.lookup::<AdRealmConfig>("ad", realm.as_str()) {
+            config
+        } else {
+            bail!("unknown Active Directory realm '{}'", realm.as_str());
+        };
+
+        let sync_settings = GeneralSyncSettings::default()
+            .apply_config(config.sync_defaults_options.as_deref())?
+            .apply_override(override_settings)?;
+        let sync_attributes = LdapSyncSettings::new(
+            "sAMAccountName",
+            config.sync_attributes.as_deref(),
+            config.user_classes.as_deref(),
+            config.filter.as_deref(),
+        )?;
+
+        let ldap_config = auth::AdAuthenticator::api_type_to_config(&config)?;
+
+        Ok(Self(LdapRealmSyncJob {
+            worker,
+            realm,
+            general_sync_settings: sync_settings,
+            ldap_sync_settings: sync_attributes,
+            ldap_config,
+            dry_run,
+        }))
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.0.sync().await
+    }
 }
 
 /// Implementation for syncing LDAP realms
@@ -77,13 +134,18 @@ impl LdapRealmSyncJob {
         let config = if let Ok(config) = domains.lookup::<LdapRealmConfig>("ldap", realm.as_str()) {
             config
         } else {
-            bail!("unknown realm '{}'", realm.as_str());
+            bail!("unknown LDAP realm '{}'", realm.as_str());
         };
 
         let sync_settings = GeneralSyncSettings::default()
-            .apply_config(&config)?
+            .apply_config(config.sync_defaults_options.as_deref())?
             .apply_override(override_settings)?;
-        let sync_attributes = LdapSyncSettings::from_config(&config)?;
+        let sync_attributes = LdapSyncSettings::new(
+            &config.user_attr,
+            config.sync_attributes.as_deref(),
+            config.user_classes.as_deref(),
+            config.filter.as_deref(),
+        )?;
 
         let ldap_config = auth::LdapAuthenticator::api_type_to_config(&config)?;
 
@@ -170,7 +232,7 @@ impl LdapRealmSyncJob {
                             "userid attribute `{user_id_attribute}` not in LDAP search result"
                         )
                     })?
-                    .get(0)
+                    .first()
                     .context("userid attribute array is empty")?
                     .clone();
 
@@ -233,7 +295,7 @@ impl LdapRealmSyncJob {
         existing_user: Option<&User>,
     ) -> User {
         let lookup = |attribute: &str, ldap_attribute: Option<&String>, schema: &'static Schema| {
-            let value = result.attributes.get(ldap_attribute?)?.get(0)?;
+            let value = result.attributes.get(ldap_attribute?)?.first()?;
             let schema = schema.unwrap_string_schema();
 
             if let Err(e) = schema.check_constraints(value) {
@@ -385,14 +447,19 @@ struct LdapSyncSettings {
 }
 
 impl LdapSyncSettings {
-    fn from_config(config: &LdapRealmConfig) -> Result<Self, Error> {
-        let mut attributes = vec![config.user_attr.clone()];
+    fn new(
+        user_attr: &str,
+        sync_attributes: Option<&str>,
+        user_classes: Option<&str>,
+        user_filter: Option<&str>,
+    ) -> Result<Self, Error> {
+        let mut attributes = vec![user_attr.to_owned()];
 
         let mut email = None;
         let mut firstname = None;
         let mut lastname = None;
 
-        if let Some(sync_attributes) = &config.sync_attributes {
+        if let Some(sync_attributes) = &sync_attributes {
             let value = LdapSyncAttributes::API_SCHEMA.parse_property_string(sync_attributes)?;
             let sync_attributes: LdapSyncAttributes = serde_json::from_value(value)?;
 
@@ -400,20 +467,20 @@ impl LdapSyncSettings {
             firstname = sync_attributes.firstname.clone();
             lastname = sync_attributes.lastname.clone();
 
-            if let Some(email_attr) = sync_attributes.email {
-                attributes.push(email_attr);
+            if let Some(email_attr) = &sync_attributes.email {
+                attributes.push(email_attr.clone());
             }
 
-            if let Some(firstname_attr) = sync_attributes.firstname {
-                attributes.push(firstname_attr);
+            if let Some(firstname_attr) = &sync_attributes.firstname {
+                attributes.push(firstname_attr.clone());
             }
 
-            if let Some(lastname_attr) = sync_attributes.lastname {
-                attributes.push(lastname_attr);
+            if let Some(lastname_attr) = &sync_attributes.lastname {
+                attributes.push(lastname_attr.clone());
             }
         }
 
-        let user_classes = if let Some(user_classes) = &config.user_classes {
+        let user_classes = if let Some(user_classes) = &user_classes {
             let a = USER_CLASSES_ARRAY.parse_property_string(user_classes)?;
             serde_json::from_value(a)?
         } else {
@@ -426,13 +493,13 @@ impl LdapSyncSettings {
         };
 
         Ok(Self {
-            user_attr: config.user_attr.clone(),
+            user_attr: user_attr.to_owned(),
             firstname_attr: firstname,
             lastname_attr: lastname,
             email_attr: email,
             attributes,
             user_classes,
-            user_filter: config.filter.clone(),
+            user_filter: user_filter.map(ToOwned::to_owned),
         })
     }
 }
@@ -447,11 +514,11 @@ impl Default for GeneralSyncSettings {
 }
 
 impl GeneralSyncSettings {
-    fn apply_config(self, config: &LdapRealmConfig) -> Result<Self, Error> {
+    fn apply_config(self, sync_defaults_options: Option<&str>) -> Result<Self, Error> {
         let mut enable_new = None;
         let mut remove_vanished = None;
 
-        if let Some(sync_defaults_options) = &config.sync_defaults_options {
+        if let Some(sync_defaults_options) = sync_defaults_options {
             let sync_defaults_options = Self::parse_sync_defaults_options(sync_defaults_options)?;
 
             enable_new = sync_defaults_options.enable_new;

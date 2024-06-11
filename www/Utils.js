@@ -199,12 +199,18 @@ Ext.define('PBS.Utils', {
 	return fingerprint.substring(0, 23);
     },
 
-    render_task_status: function(value, metadata, record) {
-	if (!record.data['last-run-upid']) {
+    render_task_status: function(value, metadata, record, rowIndex, colIndex, store) {
+	// GC tasks use 'upid' for backwards-compat, rest use 'last-run-upid'
+	if (
+	    !record.data['last-run-upid'] &&
+	    !store.getById('last-run-upid')?.data.value &&
+	    !record.data.upid &&
+	    !store.getById('upid')?.data.value
+	) {
 	    return '-';
 	}
 
-	if (!record.data['last-run-endtime']) {
+	if (!record.data['last-run-endtime'] && !store.getById('last-run-endtime')?.data.value) {
 	    metadata.tdCls = 'x-grid-row-loading';
 	    return '';
 	}
@@ -429,6 +435,23 @@ Ext.define('PBS.Utils', {
 	    zfscreate: [gettext('ZFS Storage'), gettext('Create')],
 	});
 
+	Proxmox.Utils.overrideNotificationFieldName({
+	    'datastore': gettext('Datastore'),
+	    'job-id': gettext('Job ID'),
+	    'media-pool': gettext('Media Pool'),
+	});
+
+	Proxmox.Utils.overrideNotificationFieldValue({
+	    'acme': gettext('ACME certificate renewal'),
+	    'gc': gettext('Garbage collection'),
+	    'package-updates': gettext('Package updates are available'),
+	    'prune': gettext('Prune job'),
+	    'sync': gettext('Sync job'),
+	    'tape-backup': gettext('Tape backup notifications'),
+	    'tape-load': gettext('Tape loading request'),
+	    'verify': gettext('Verification job'),
+	});
+
 	Proxmox.Schema.overrideAuthDomains({
 	    pbs: {
 		name: 'Proxmox Backup authentication server',
@@ -438,6 +461,28 @@ Ext.define('PBS.Utils', {
 		sync: false,
 	    },
 	});
+
+	// TODO: use `overrideEndpointTypes` later - not done right now to avoid
+	// breakage if widget-toolkit is not updated yet.
+	Proxmox.Schema.notificationEndpointTypes = {
+	    sendmail: {
+		name: 'Sendmail',
+		    ipanel: 'pmxSendmailEditPanel',
+		    iconCls: 'fa-envelope-o',
+		    defaultMailAuthor: 'Proxmox Backup Server - $hostname',
+	    },
+	    smtp: {
+		name: 'SMTP',
+		    ipanel: 'pmxSmtpEditPanel',
+		    iconCls: 'fa-envelope-o',
+		    defaultMailAuthor: 'Proxmox Backup Server - $hostname',
+	    },
+	    gotify: {
+		name: 'Gotify',
+		    ipanel: 'pmxGotifyEditPanel',
+		    iconCls: 'fa-bell-o',
+	    },
+	};
     },
 
     // Convert an ArrayBuffer to a base64url encoded string.
@@ -614,6 +659,9 @@ Ext.define('PBS.Utils', {
 	    if (key === 'bytes-read' || key === 'bytes-written') {
 		val = Proxmox.Utils.format_size(val);
 	    }
+	    if (key === 'drive-activity') {
+		val = PBS.Utils.renderDriveActivity(val);
+	    }
 	    list.push({ key: key, value: val });
 	}
 
@@ -647,8 +695,37 @@ Ext.define('PBS.Utils', {
 	}).show();
     },
 
-    renderDriveState: function(value, md) {
+    tapeDriveActivities: {
+	'no-activity': gettext('No Activity'),
+	'cleaning': gettext('Cleaning'),
+	'loading': gettext('Loading'),
+	'unloading': gettext('Unloading'),
+	'other': gettext('Other Activity'),
+	'reading': gettext('Reading data'),
+	'writing': gettext('Writing data'),
+	'locating': gettext('Locating'),
+	'rewinding': gettext('Rewinding'),
+	'erasing': gettext('Erasing'),
+	'formatting': gettext('Formatting'),
+	'calibrating': gettext('Calibrating'),
+	'other-dt': gettext('Other DT Activity'),
+	'microcode-update': gettext('Updating Microcode'),
+	'reading-encrypted': gettext('Reading encrypted data'),
+	'writing-encrypted': gettext('Writing encrypted data'),
+    },
+
+    renderDriveActivity: function(value) {
 	if (!value) {
+	    return Proxmox.Utils.unknownText;
+	}
+	return PBS.Utils.tapeDriveActivities[value] ?? value;
+    },
+
+    renderDriveState: function(value, md, rec) {
+	if (!value) {
+	    if (rec?.data?.activity && rec?.data?.activity !== 'no-activity') {
+		return PBS.Utils.renderDriveActivity(rec.data.activity);
+	    }
 	    return gettext('Idle');
 	}
 

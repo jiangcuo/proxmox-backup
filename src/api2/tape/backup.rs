@@ -9,20 +9,21 @@ use proxmox_schema::api;
 use proxmox_sys::{task_log, task_warn, WorkerTaskContext};
 
 use pbs_api_types::{
-    print_ns_and_snapshot, print_store_and_ns, Authid, GroupFilter, MediaPoolConfig, Operation,
-    TapeBackupJobConfig, TapeBackupJobSetup, TapeBackupJobStatus, Userid, JOB_ID_SCHEMA,
+    print_ns_and_snapshot, print_store_and_ns, Authid, MediaPoolConfig, Operation,
+    TapeBackupJobConfig, TapeBackupJobSetup, TapeBackupJobStatus, JOB_ID_SCHEMA,
     PRIV_DATASTORE_READ, PRIV_TAPE_AUDIT, PRIV_TAPE_WRITE, UPID_SCHEMA,
 };
 
 use pbs_config::CachedUserInfo;
-use pbs_datastore::backup_info::{BackupDir, BackupGroup, BackupInfo};
+use pbs_datastore::backup_info::{BackupDir, BackupInfo};
 use pbs_datastore::{DataStore, StoreProgress};
 use proxmox_rest_server::WorkerTask;
 
+use crate::tape::TapeNotificationMode;
 use crate::{
     server::{
         jobstate::{compute_schedule_status, Job, JobState},
-        lookup_user_email, TapeBackupJobSummary,
+        TapeBackupJobSummary,
     },
     tape::{
         changer::update_changer_online_status,
@@ -162,12 +163,6 @@ pub fn do_tape_backup_job(
         Some(lock_tape_device(&drive_config, &setup.drive)?)
     };
 
-    let notify_user = setup
-        .notify_user
-        .as_ref()
-        .unwrap_or_else(|| Userid::root_userid());
-    let email = lookup_user_email(notify_user);
-
     let upid_str = WorkerTask::new_thread(
         &worker_type,
         Some(job_id.clone()),
@@ -206,7 +201,6 @@ pub fn do_tape_backup_job(
                     datastore,
                     &pool_config,
                     &setup,
-                    email.clone(),
                     &mut summary,
                     false,
                 )
@@ -214,16 +208,13 @@ pub fn do_tape_backup_job(
 
             let status = worker.create_state(&job_result);
 
-            if let Some(email) = email {
-                if let Err(err) = crate::server::send_tape_backup_status(
-                    &email,
-                    Some(job.jobname()),
-                    &setup,
-                    &job_result,
-                    summary,
-                ) {
-                    eprintln!("send tape backup notification failed: {}", err);
-                }
+            if let Err(err) = crate::server::send_tape_backup_status(
+                Some(job.jobname()),
+                &setup,
+                &job_result,
+                summary,
+            ) {
+                eprintln!("send tape backup notification failed: {err}");
             }
 
             if let Err(err) = job.finish(status) {
@@ -328,12 +319,6 @@ pub fn backup(
 
     let job_id = format!("{}:{}:{}", setup.store, setup.pool, setup.drive);
 
-    let notify_user = setup
-        .notify_user
-        .as_ref()
-        .unwrap_or_else(|| Userid::root_userid());
-    let email = lookup_user_email(notify_user);
-
     let upid_str = WorkerTask::new_thread(
         "tape-backup",
         Some(job_id),
@@ -349,21 +334,14 @@ pub fn backup(
                 datastore,
                 &pool_config,
                 &setup,
-                email.clone(),
                 &mut summary,
                 force_media_set,
             );
 
-            if let Some(email) = email {
-                if let Err(err) = crate::server::send_tape_backup_status(
-                    &email,
-                    None,
-                    &setup,
-                    &job_result,
-                    summary,
-                ) {
-                    eprintln!("send tape backup notification failed: {}", err);
-                }
+            if let Err(err) =
+                crate::server::send_tape_backup_status(None, &setup, &job_result, summary)
+            {
+                eprintln!("send tape backup notification failed: {err}");
             }
 
             // ignore errors
@@ -386,7 +364,6 @@ fn backup_worker(
     datastore: Arc<DataStore>,
     pool_config: &MediaPoolConfig,
     setup: &TapeBackupJobSetup,
-    email: Option<String>,
     summary: &mut TapeBackupJobSummary,
     force_media_set: bool,
 ) -> Result<(), Error> {
@@ -399,9 +376,16 @@ fn backup_worker(
     let ns_magic = !root_namespace.is_root() || setup.max_depth != Some(0);
 
     let pool = MediaPool::with_config(TAPE_STATUS_DIR, pool_config, changer_name, false)?;
+    let notification_mode = TapeNotificationMode::from(setup);
 
-    let mut pool_writer =
-        PoolWriter::new(pool, &setup.drive, worker, email, force_media_set, ns_magic)?;
+    let mut pool_writer = PoolWriter::new(
+        pool,
+        &setup.drive,
+        worker,
+        notification_mode,
+        force_media_set,
+        ns_magic,
+    )?;
 
     let mut group_list = Vec::new();
     let namespaces = datastore.recursive_iter_backup_ns_ok(root_namespace, setup.max_depth)?;
@@ -411,31 +395,24 @@ fn backup_worker(
 
     group_list.sort_unstable_by(|a, b| a.group().cmp(b.group()));
 
-    let (group_list, group_count) = if let Some(group_filters) = &setup.group_filter {
-        let filter_fn = |group: &BackupGroup, group_filters: &[GroupFilter]| {
-            group_filters.iter().any(|filter| group.matches(filter))
-        };
+    let group_count_full = group_list.len();
 
-        let group_count_full = group_list.len();
-        let list: Vec<BackupGroup> = group_list
+    let group_list = match &setup.group_filter {
+        Some(f) => group_list
             .into_iter()
-            .filter(|group| filter_fn(group, group_filters))
-            .collect();
-        let group_count = list.len();
-        task_log!(
-            worker,
-            "found {} groups (out of {} total)",
-            group_count,
-            group_count_full
-        );
-        (list, group_count)
-    } else {
-        let group_count = group_list.len();
-        task_log!(worker, "found {} groups", group_count);
-        (group_list, group_count)
+            .filter(|group| group.group().apply_filters(f))
+            .collect(),
+        None => group_list,
     };
 
-    let mut progress = StoreProgress::new(group_count as u64);
+    task_log!(
+        worker,
+        "found {} groups (out of {} total)",
+        group_list.len(),
+        group_count_full
+    );
+
+    let mut progress = StoreProgress::new(group_list.len() as u64);
 
     let latest_only = setup.latest_only.unwrap_or(false);
 
